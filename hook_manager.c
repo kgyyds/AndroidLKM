@@ -142,14 +142,26 @@ bool should_hook_uid(uid_t uid)
 
 extern int vfs_hook_init(void);
 extern void vfs_hook_exit(void);
+extern int hook_init_kprobe(void);
+extern void hook_exit_kprobe(void);
 
 int hook_init(void)
 {
-    int ret = vfs_hook_init();
+    int ret;
+
+    ret = hook_init_kprobe();
     if (ret < 0) {
-        pr_err("hook: failed to init vfs hook: %d\n", ret);
+        pr_err("hook: failed to init kprobe: %d\n", ret);
         return ret;
     }
+
+    ret = vfs_hook_init();
+    if (ret < 0) {
+        pr_err("hook: failed to init vfs hook: %d\n", ret);
+        hook_exit_kprobe();
+        return ret;
+    }
+
     pr_info("hook: module initialized\n");
     return 0;
 }
@@ -157,6 +169,7 @@ int hook_init(void)
 void hook_exit(void)
 {
     vfs_hook_exit();
+    hook_exit_kprobe();
     clear_hidden_list();
     pr_info("hook: module exited\n");
 }
