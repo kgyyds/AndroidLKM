@@ -1,45 +1,25 @@
 /*
- * hook_manager.c - Hook core manager
- * File hiding module - 与 KernelSU 相同风格
+ * hook_manager.c - 最简单的测试模块
+ * 排除法：先确认模块能加载，再逐步加功能
  */
 
 #include <linux/module.h>
+#include <linux/miscdevice.h>
+#include <linux/fs.h>
 #include <linux/slab.h>
-#include <linux/spinlock.h>
 #include <linux/string.h>
-#include <linux/unistd.h>
-#include <linux/uaccess.h>
-#include <linux/kallsyms.h>
 
 #include "hook.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("HOOK");
-MODULE_DESCRIPTION("File Hiding Module");
+MODULE_DESCRIPTION("File Hiding Module - Test");
 MODULE_VERSION("1.0");
 
-/* Hidden file/folder storage */
+/* Hidden file storage */
 static struct hidden_entry hidden_files[MAX_HIDDEN_FILES];
 static int hidden_count;
 static DEFINE_SPINLOCK(hidden_lock);
-
-/* Syscall hook support - 和 KernelSU 一样的方式 */
-static void **kallsyms_syscall_table;
-
-typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *);
-static syscall_fn_t orig_getdents64;
-
-#ifdef __aarch64__
-static inline void __user *get_dirent_ptr(const struct pt_regs *regs)
-{
-	return (void __user *)regs->regs[1];
-}
-#else
-static inline void __user *get_dirent_ptr(const struct pt_regs *regs)
-{
-	return (void __user *)regs->di;
-}
-#endif
 
 int add_hidden_file(const char *name, bool is_dir)
 {
@@ -135,134 +115,108 @@ void clear_hidden_list(void)
 	pr_info("hook: hidden list cleared\n");
 }
 
-/* Directory entry structure */
-struct linux_dirent64 {
-	u64 d_ino;
-	s64 d_off;
-	unsigned short d_reclen;
-	unsigned char d_type;
-	char d_name[256];
-};
+/* Device node */
+static bool dev_registered;
 
-/* Hooked getdents64 syscall - 先调用原始函数，再过滤 */
-static asmlinkage long hook_getdents64(const struct pt_regs *regs)
+static ssize_t hidefile_write(struct file *file, const char __user *buf,
+			      size_t count, loff_t *ppos)
 {
-	long ret;
-	struct linux_dirent64 __user *dirent;
-	struct linux_dirent64 *kbuf = NULL;
-	struct linux_dirent64 *curr, *prev;
-	int count;
-	int new_count;
-	char name[256];
+	char *kbuf;
+	char *cmd;
+	int ret;
 
-	/* 调用原始 syscall */
-	ret = orig_getdents64(regs);
-	if (ret <= 0)
-		return ret;
+	if (count == 0)
+		return 0;
 
-	dirent = get_dirent_ptr(regs);
-	count = (int)ret;
-
-	kbuf = kmalloc(count + 256, GFP_KERNEL);
+	kbuf = kmalloc(count + 1, GFP_KERNEL);
 	if (!kbuf)
-		return ret;
+		return -ENOMEM;
 
-	if (copy_from_user(kbuf, dirent, count)) {
+	if (copy_from_user(kbuf, buf, count)) {
 		kfree(kbuf);
-		return ret;
+		return -EFAULT;
+	}
+	kbuf[count] = '\0';
+
+	cmd = strim(kbuf);
+
+	if (strcmp(cmd, "clear") == 0) {
+		clear_hidden_list();
+		kfree(kbuf);
+		return count;
 	}
 
-	curr = kbuf;
-	prev = NULL;
-	new_count = count;
-
-	while (curr < kbuf + count) {
-		unsigned short reclen = curr->d_reclen;
-
-		if (reclen == 0)
-			break;
-
-		memset(name, 0, sizeof(name));
-		strncpy(name, curr->d_name, sizeof(name) - 1);
-
-		if (is_hidden(name, curr->d_type == DT_DIR)) {
-			new_count -= reclen;
-			if (prev)
-				prev->d_off = curr->d_off;
-		} else {
-			prev = curr;
-		}
-
-		curr = (struct linux_dirent64 *)((char *)curr + reclen);
+	if (strncmp(cmd, "d:", 2) == 0) {
+		ret = add_hidden_file(cmd + 2, true);
+	} else {
+		ret = add_hidden_file(cmd, false);
 	}
 
-	if (new_count < count && new_count > 0) {
-		if (copy_to_user(dirent, kbuf, new_count))
-			new_count = count;
-	}
+	if (ret == 0)
+		pr_info("hook: hidden: %s\n", cmd);
+	else if (ret != -EEXIST)
+		pr_err("hook: add failed: %d\n", ret);
 
 	kfree(kbuf);
-	return new_count;
+	return count;
 }
 
-/* External vfs hook functions */
-extern int vfs_hook_init(void);
-extern void vfs_hook_exit(void);
-
-/* Syscall table patching - 和 KernelSU 一样 */
-static int patch_syscall_table(int nr, syscall_fn_t fn)
+static ssize_t hidefile_read(struct file *file, char __user *buf,
+			     size_t count, loff_t *ppos)
 {
-	if (kallsyms_syscall_table == NULL)
-		return -ENOENT;
-	if (nr < 0 || nr >= 512)
-		return -EINVAL;
+	const char *msg = "Usage:\n  echo file > /dev/hidefile\n  echo d:dir > /dev/hidefile\n  echo clear > /dev/hidefile\n";
+	size_t len = strlen(msg);
 
-	kallsyms_syscall_table[nr] = (void *)fn;
+	if (*ppos >= len)
+		return 0;
 
-#ifdef __aarch64__
-	asm volatile("dsb ish; isb" ::: "memory");
-#endif
+	if (*ppos + count > len)
+		count = len - *ppos;
 
-	return 0;
+	if (copy_to_user(buf, msg + *ppos, count))
+		return -EFAULT;
+
+	*ppos += count;
+	return count;
 }
+
+static struct file_operations hidefile_fops = {
+	.owner = THIS_MODULE,
+	.read = hidefile_read,
+	.write = hidefile_write,
+};
+
+static struct miscdevice hidefile_dev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "hidefile",
+	.fops = &hidefile_fops,
+	.mode = 0666,
+};
 
 static int __init hook_init(void)
 {
 	int ret;
-	int nr_getdents64 = 61; /* __NR_getdents64 */
 
-	/* 获取 syscall table - 和 KernelSU 一样通过 kallsyms */
-	kallsyms_syscall_table = (void **)kallsyms_lookup_name("sys_call_table");
-	if (!kallsyms_syscall_table) {
-		pr_err("hook: failed to find sys_call_table\n");
-		return -ENOENT;
-	}
-	pr_info("hook: sys_call_table = %px\n", kallsyms_syscall_table);
+	pr_info("hook: initializing (simple test)...\n");
 
-	/* 保存原始函数并 hook */
-	orig_getdents64 = (syscall_fn_t)kallsyms_syscall_table[nr_getdents64];
-	ret = patch_syscall_table(nr_getdents64, hook_getdents64);
+	ret = misc_register(&hidefile_dev);
 	if (ret < 0) {
-		pr_err("hook: failed to patch getdents64: %d\n", ret);
+		pr_err("hook: misc_register failed: %d\n", ret);
 		return ret;
 	}
+	dev_registered = true;
 
-	ret = vfs_hook_init();
-	if (ret < 0)
-		pr_warn("hook: vfs_hook_init failed: %d\n", ret);
-
-	pr_info("hook: module initialized\n");
+	pr_info("hook: /dev/hidefile created\n");
+	pr_info("hook: module initialized (no syscall hook yet)\n");
 	return 0;
 }
 
 static void __exit hook_exit(void)
 {
-	int nr_getdents64 = 61;
-
-	if (kallsyms_syscall_table)
-		kallsyms_syscall_table[nr_getdents64] = (void *)orig_getdents64;
-
-	vfs_hook_exit();
+	if (dev_registered) {
+		misc_deregister(&hidefile_dev);
+		dev_registered = false;
+	}
 	clear_hidden_list();
 	pr_info("hook: module exited\n");
 }
