@@ -16,16 +16,6 @@ on:
         required: false
         default: '20260313'
         type: string
-      expected_size2:
-        description: 'Second expected signature size'
-        required: false
-        default: ''
-        type: string
-      expected_hash2:
-        description: 'Second expected signature hash'
-        required: false
-        default: ''
-        type: string
 
 jobs:
   build-hook-ko:
@@ -41,8 +31,6 @@ jobs:
 
     - name: Build hook.ko
       env:
-        EXPECTED_SIZE2: ${{ inputs.expected_size2 }}
-        EXPECTED_HASH2: ${{ inputs.expected_hash2 }}
         ARCH: ${{ inputs.arch }}
       run: |
         echo "=== Building hook.ko for KMI: ${{ inputs.kmi }}, ARCH: ${{ inputs.arch }} ==="
@@ -56,10 +44,15 @@ jobs:
           export CC=clang
         fi
 
-        # 和 KernelSU 一样的方式编译
+        # 编译模块 - 直接使用 make，不需要额外参数
         CONFIG_HOOK=m CC=clang make
 
         echo "=== Build completed ==="
+
+        if [ ! -f hook.ko ]; then
+          echo "ERROR: hook.ko not found!"
+          exit 1
+        fi
 
         # 创建输出目录
         mkdir -p /github/workspace/out
@@ -70,7 +63,6 @@ jobs:
 
         echo "Copied to: /github/workspace/out/$OUTPUT_NAME"
         ls -la "/github/workspace/out/$OUTPUT_NAME"
-        echo "Size: $(du -h "/github/workspace/out/$OUTPUT_NAME" | cut -f1)"
 
         # strip
         llvm-strip -d "/github/workspace/out/$OUTPUT_NAME" 2>/dev/null || true
