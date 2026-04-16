@@ -57,7 +57,7 @@ jobs:
         fi
 
         # 编译
-        make ARCH=$ARCH CC=$CC
+        make ARCH=$ARCH CC=$CC modules
 
         echo "=== Build completed ==="
 
