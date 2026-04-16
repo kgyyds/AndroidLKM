@@ -56,10 +56,8 @@ jobs:
           export CC=clang
         fi
 
-        # 不设置 LOCALVERSION，使用 DDK 默认版本
-
-        # 编译 - 禁用 modversions 以跨内核版本
-        make ARCH=$ARCH CC=$CC KERNELRELEASE=5.10.0 modules KCFLAGS="-DRELEASE=5.10.0"
+        # 和 KernelSU 一样的方式编译
+        CONFIG_HOOK=m CC=clang make
 
         echo "=== Build completed ==="
 
