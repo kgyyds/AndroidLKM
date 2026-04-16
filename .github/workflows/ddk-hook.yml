@@ -56,8 +56,8 @@ jobs:
           export CC=clang
         fi
 
-        # 设置内核版本为空（去掉 -dirty 后缀）
-        export LOCALVERSION=""
+        # 设置内核版本为 -dirty 匹配实际内核
+        export LOCALVERSION="-dirty"
 
         # 编译
         make ARCH=$ARCH CC=$CC modules

