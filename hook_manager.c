@@ -252,7 +252,11 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 }
 
 static struct kretprobe rp_getdents64 = {
-	.symbol_name = "__x64_sys_getdents64",
+#ifdef __aarch64__
+	.kp = { .symbol_name = "__arm64_sys_getdents64" },
+#else
+	.kp = { .symbol_name = "__x64_sys_getdents64" },
+#endif
 	.entry_handler = getdents64_rp_pre,
 	.handler = getdents64_rp_handler,
 	.data_size = 0,
