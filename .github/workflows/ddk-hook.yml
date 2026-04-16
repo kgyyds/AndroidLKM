@@ -45,10 +45,6 @@ jobs:
         EXPECTED_HASH2: ${{ inputs.expected_hash2 }}
         ARCH: ${{ inputs.arch }}
       run: |
-        git config --global --add safe.directory /__w/HOOK/HOOK
-
-        cd HOOK
-
         echo "=== Building hook.ko for KMI: ${{ inputs.kmi }}, ARCH: ${{ inputs.arch }} ==="
 
         # 设置架构
