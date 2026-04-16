@@ -58,8 +58,8 @@ jobs:
 
         # 不设置 LOCALVERSION，使用 DDK 默认版本
 
-        # 编译
-        make ARCH=$ARCH CC=$CC modules
+        # 编译 - 禁用 modversions 以跨内核版本
+        make ARCH=$ARCH CC=$CC KERNELRELEASE=5.10.0 modules KCFLAGS="-DRELEASE=5.10.0"
 
         echo "=== Build completed ==="
 

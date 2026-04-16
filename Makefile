@@ -1,8 +1,10 @@
 # HOOK - File Hiding Module Makefile
-# ARM64 compatible
+# ARM64 compatible, 5.10 cross-version
 
 obj-m := hook.o
 hook-objs := hook_manager.o vfs_hook.o
+
+ccflags-y := -Wno-error
 
 all:
 	@echo "Usage: make ARCH=arm64 CC=clang modules"
