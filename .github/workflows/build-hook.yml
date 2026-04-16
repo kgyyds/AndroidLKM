@@ -1,6 +1,9 @@
 name: Build HOOK Kernel Module
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       expected_size2:
