@@ -1,14 +1,11 @@
-# HOOK - 文件隐藏模块 Makefile
-# 使用 Ftrace 框架
-# 支持 Linux 5.7 - 6.12
+# HOOK - File Hiding Module Makefile
+# ARM64 compatible
 
 obj-m := hook.o
-hook-objs := hook_manager.o
+hook-objs := hook_manager.o vfs_hook.o
 
 all:
-	@echo "Usage:"
-	@echo "  make ARCH=arm64 CC=clang        - 编译 arm64 版本"
-	@echo "  make clean                      - 清理"
+	@echo "Usage: make ARCH=arm64 CC=clang modules"
 
 modules:
 	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CC=$(CC) modules

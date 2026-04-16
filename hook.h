@@ -1,13 +1,11 @@
 /*
- * hook.h - 文件隐藏模块头文件
- * 用于隐藏文件/目录
+ * hook.h - File hiding module header
  */
 
 #ifndef _HOOK_H
 #define _HOOK_H
 
 #include <linux/types.h>
-#include <linux/uidgid.h>
 
 #define MAX_HIDDEN_FILES 64
 

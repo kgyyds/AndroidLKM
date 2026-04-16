@@ -1,6 +1,6 @@
 /*
- * hook_manager.c - Hook 核心管理器
- * 使用 Ftrace 框架
+ * hook_manager.c - Hook core manager
+ * File hiding module for ARM64
  */
 
 #include <linux/module.h>
@@ -9,8 +9,6 @@
 #include <linux/string.h>
 
 #include "hook.h"
-#include "ftrace_helper.h"
-#include "hooks_getdents64.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("HOOK");
@@ -116,14 +114,18 @@ void clear_hidden_list(void)
     pr_info("hook: hidden list cleared\n");
 }
 
+/* External vfs hook functions */
+extern int vfs_hook_init(void);
+extern void vfs_hook_exit(void);
+
 static int __init hook_init(void)
 {
-    int err;
+    int ret;
 
-    err = fh_install_hooks(syscall_hooks, ARRAY_SIZE(syscall_hooks));
-    if (err) {
-        pr_err("hook: failed to install hooks: %d\n", err);
-        return err;
+    ret = vfs_hook_init();
+    if (ret < 0) {
+        pr_err("hook: failed to init vfs hook: %d\n", ret);
+        return ret;
     }
 
     pr_info("hook: module initialized\n");
@@ -132,7 +134,7 @@ static int __init hook_init(void)
 
 static void __exit hook_exit(void)
 {
-    fh_remove_hooks(syscall_hooks, ARRAY_SIZE(syscall_hooks));
+    vfs_hook_exit();
     clear_hidden_list();
     pr_info("hook: module exited\n");
 }
