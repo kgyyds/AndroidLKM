@@ -1,0 +1,87 @@
+name: Build HOOK.ko (DDK)
+
+on:
+  workflow_call:
+    inputs:
+      kmi:
+        description: 'KMI version'
+        required: true
+        type: string
+      arch:
+        description: 'Architecture (arm64/x86_64)'
+        required: true
+        type: string
+      ddk_release:
+        description: 'DDK release version'
+        required: false
+        default: '20260313'
+        type: string
+      expected_size2:
+        description: 'Second expected signature size'
+        required: false
+        default: ''
+        type: string
+      expected_hash2:
+        description: 'Second expected signature hash'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build-hook-ko:
+    name: Build hook.ko for ${{ inputs.kmi }}-${{ inputs.arch }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
+      options: --privileged
+
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v6
+
+    - name: Build hook.ko
+      env:
+        EXPECTED_SIZE2: ${{ inputs.expected_size2 }}
+        EXPECTED_HASH2: ${{ inputs.expected_hash2 }}
+        ARCH: ${{ inputs.arch }}
+      run: |
+        git config --global --add safe.directory /__w/HOOK/HOOK
+
+        cd HOOK
+
+        echo "=== Building hook.ko for KMI: ${{ inputs.kmi }}, ARCH: ${{ inputs.arch }} ==="
+
+        # 设置架构
+        if [ "$ARCH" = "arm64" ]; then
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=clang
+        else
+          export CROSS_COMPILE=x86_64-linux-gnu-
+          export CC=clang
+        fi
+
+        # 编译
+        make ARCH=$ARCH CC=$CC
+
+        echo "=== Build completed ==="
+
+        # 创建输出目录
+        mkdir -p /github/workspace/out
+
+        # 复制输出文件
+        OUTPUT_NAME="${{ inputs.kmi }}_${{ inputs.arch }}_hook.ko"
+        cp hook.ko "/github/workspace/out/$OUTPUT_NAME"
+
+        echo "Copied to: /github/workspace/out/$OUTPUT_NAME"
+        ls -la "/github/workspace/out/$OUTPUT_NAME"
+        echo "Size: $(du -h "/github/workspace/out/$OUTPUT_NAME" | cut -f1)"
+
+        # strip
+        llvm-strip -d "/github/workspace/out/$OUTPUT_NAME" 2>/dev/null || true
+        echo "Size after strip: $(du -h "/github/workspace/out/$OUTPUT_NAME" | cut -f1)"
+
+    - name: Upload hook.ko artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.kmi }}-${{ inputs.arch }}-hook
+        path: /github/workspace/out/${{ inputs.kmi }}_${{ inputs.arch }}_hook.ko

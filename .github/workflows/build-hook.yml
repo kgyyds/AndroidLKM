@@ -1,0 +1,38 @@
+name: Build HOOK Kernel Module
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_size2:
+        description: 'Second expected signature size'
+        required: false
+        default: ''
+        type: string
+      expected_hash2:
+        description: 'Second expected signature hash'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build-hook:
+    strategy:
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+        arch:
+          - arm64
+          - x86_64
+    uses: ./.github/workflows/ddk-hook.yml
+    with:
+      kmi: ${{ matrix.kmi }}
+      arch: ${{ matrix.arch }}
+      ddk_release: '20260313'
+      expected_size2: ${{ inputs.expected_size2 || '' }}
+      expected_hash2: ${{ inputs.expected_hash2 || '' }}
