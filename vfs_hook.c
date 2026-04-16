@@ -29,18 +29,10 @@ static int pre_getdents64(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
-/* getdents64 fault_handler */
-static int fault_getdents64(struct kprobe *p, struct pt_regs *regs, int trapnr)
-{
-    pr_err("hook: kprobe fault at %p\n", p->addr);
-    return 1;
-}
-
 /* Kprobe for sys_getdents64 */
 static struct kprobe kp = {
     .symbol_name = "sys_getdents64",
     .pre_handler = pre_getdents64,
-    .fault_handler = fault_getdents64,
 };
 
 int vfs_hook_init(void)
