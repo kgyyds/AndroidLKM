@@ -140,14 +140,23 @@ bool should_hook_uid(uid_t uid)
     return true; /* 默认 hook 所有 */
 }
 
+extern int vfs_hook_init(void);
+extern void vfs_hook_exit(void);
+
 int hook_init(void)
 {
-    pr_info("hook: module initialized (5.10-6.12 compatible)\n");
+    int ret = vfs_hook_init();
+    if (ret < 0) {
+        pr_err("hook: failed to init vfs hook: %d\n", ret);
+        return ret;
+    }
+    pr_info("hook: module initialized\n");
     return 0;
 }
 
 void hook_exit(void)
 {
+    vfs_hook_exit();
     clear_hidden_list();
     pr_info("hook: module exited\n");
 }

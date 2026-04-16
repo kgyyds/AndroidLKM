@@ -1,18 +1,11 @@
-# HOOK - 内核通用 Hook 框架 Makefile
-# 支持 Linux 5.10 - 6.12 内核，多架构兼容
+# HOOK - 文件隐藏模块 Makefile
+# 支持 Linux 5.10 - 6.12 内核
 
 # 模块名称
 obj-m := hook.o
 
 # 源文件
-hook-objs := hook_manager.o kprobe_hook.o vfs_hook.o
-
-# 架构特定源文件
-ifeq ($(ARCH),arm64)
-    hook-objs += arm64/syscall_hook.o arm64/patch_memory.o
-else ifeq ($(ARCH),x86_64)
-    hook-objs += x86_64/syscall_hook.o x86_64/patch_memory.o
-endif
+hook-objs := hook_manager.o vfs_hook.o
 
 # 内核版本检查 (可选)
 KSU_EXPECTED_SIZE2 ?=
