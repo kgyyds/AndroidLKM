@@ -7,10 +7,6 @@ on:
         description: 'KMI version'
         required: true
         type: string
-      arch:
-        description: 'Architecture (arm64/x86_64)'
-        required: true
-        type: string
       ddk_release:
         description: 'DDK release version'
         required: false
@@ -19,7 +15,7 @@ on:
 
 jobs:
   build-hook-ko:
-    name: Build hook.ko for ${{ inputs.kmi }}-${{ inputs.arch }}
+    name: Build hook.ko for ${{ inputs.kmi }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
@@ -30,21 +26,11 @@ jobs:
       uses: actions/checkout@v6
 
     - name: Build hook.ko
-      env:
-        ARCH: ${{ inputs.arch }}
       run: |
-        echo "=== Building hook.ko for KMI: ${{ inputs.kmi }}, ARCH: ${{ inputs.arch }} ==="
+        echo "=== Building hook.ko for KMI: ${{ inputs.kmi }} ==="
 
-        # 设置架构
-        if [ "$ARCH" = "arm64" ]; then
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang
-        else
-          export CROSS_COMPILE=x86_64-linux-gnu-
-          export CC=clang
-        fi
-
-        # 编译模块 - 直接使用 make，不需要额外参数
+        # 和 KernelSU 完全一样的方式编译
+        # 不需要指定 ARCH/CROSS_COMPILE，DDK 容器已设置好
         CONFIG_HOOK=m CC=clang make
 
         echo "=== Build completed ==="
@@ -58,18 +44,18 @@ jobs:
         mkdir -p /github/workspace/out
 
         # 复制输出文件
-        OUTPUT_NAME="${{ inputs.kmi }}_${{ inputs.arch }}_hook.ko"
+        OUTPUT_NAME="${{ inputs.kmi }}_hook.ko"
         cp hook.ko "/github/workspace/out/$OUTPUT_NAME"
 
         echo "Copied to: /github/workspace/out/$OUTPUT_NAME"
         ls -la "/github/workspace/out/$OUTPUT_NAME"
 
         # strip
-        llvm-strip -d "/github/workspace/out/$OUTPUT_NAME" 2>/dev/null || true
+        llvm-strip -d "/github/workspace/out/$OUTPUT_NAME"
         echo "Size after strip: $(du -h "/github/workspace/out/$OUTPUT_NAME" | cut -f1)"
 
     - name: Upload hook.ko artifact
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ inputs.kmi }}-${{ inputs.arch }}-hook
-        path: /github/workspace/out/${{ inputs.kmi }}_${{ inputs.arch }}_hook.ko
+        name: ${{ inputs.kmi }}-hook
+        path: /github/workspace/out/${{ inputs.kmi }}_hook.ko

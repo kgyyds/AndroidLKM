@@ -1,46 +1,25 @@
 # HOOK - File Hiding Module Makefile
-# ARM64/x86_64 compatible, supports multiple kernel versions
+# 与 KernelSU 相同的编译方式
 
-CONFIG_HOOK := m
-ARCH ?= arm64
+KDIR := $(KDIR)
+MDIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
-# Cross compilation settings
-ifeq ($(ARCH),arm64)
-    CROSS_COMPILE := aarch64-linux-gnu-
-    CC := clang
-else ifeq ($(ARCH),x86_64)
-    CROSS_COMPILE := x86_64-linux-gnu-
-    CC := clang
-endif
+$(info -- KDIR: $(KDIR))
+$(info -- MDIR: $(MDIR))
 
-obj-m += hook.o
-hook-objs := hook_manager.o vfs_hook.o
-
-# Extra compile flags
-ccflags-y += -I$(src)
+.PHONY: all clean
 
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CC=$(CC) modules
-
-help:
-	@echo "HOOK Module Makefile"
-	@echo ""
-	@echo "Usage:"
-	@echo "  make KDIR=/path/to/kernel ARCH=arm64 CC=clang"
-	@echo ""
-	@echo "Arguments:"
-	@echo "  KDIR   - Path to kernel source (required)"
-	@echo "  ARCH   - Architecture: arm64 or x86_64 (default: arm64)"
-	@echo "  CC     - Compiler: clang (default)"
-	@echo ""
-	@echo "Example:"
-	@echo "  # With DDK:"
-	@echo "  ddk build -e CONFIG_HOOK=m ARCH=arm64 CC=clang"
-	@echo ""
-	@echo "  # With manual kernel path:"
-	@echo "  make KDIR=~/android/kernel CC=clang"
+	make -C $(KDIR) M=$(MDIR) modules -j$(shell nproc)
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	rm -f *.o *.ko *.mod.c modules.order *.mod *.symvers .*.cmd 2>/dev/null
-	rm -rf .tmp_versions Module.symvers .version
+	make -C $(KDIR) M=$(MDIR) clean
+
+# 和 KernelSU 完全一样的 obj 语法
+obj-$(CONFIG_HOOK) += hook.o
+hook-objs := hook_manager.o vfs_hook.o
+
+# 关键编译参数 - 和 KernelSU 一样
+ccflags-y += -I$(src)
+ccflags-y += -Wno-strict-prototypes -Wno-int-conversion -Wno-gcc-compat -Wno-missing-prototypes
+ccflags-y += -Wno-declaration-after-statement -Wno-unused-function
