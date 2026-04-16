@@ -31,7 +31,6 @@ jobs:
           - android16-6.12
         arch:
           - arm64
-          - x86_64
     uses: ./.github/workflows/ddk-hook.yml
     with:
       kmi: ${{ matrix.kmi }}
