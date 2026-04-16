@@ -6,6 +6,7 @@
 #define _HOOK_H
 
 #include <linux/types.h>
+#include <linux/miscdevice.h>
 
 #define MAX_HIDDEN_FILES 64
 

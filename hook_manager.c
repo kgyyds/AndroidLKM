@@ -35,7 +35,7 @@ int add_hidden_file(const char *name, bool is_dir)
             strcmp(hidden_files[i].name, name) == 0 &&
             hidden_files[i].is_dir == is_dir) {
             spin_unlock_irqrestore(&hidden_lock, flags);
-            return 0;
+            return -EEXIST;
         }
     }
 
