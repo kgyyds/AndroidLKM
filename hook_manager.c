@@ -181,6 +181,8 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 	struct linux_dirent64 *curr, *write_ptr;
 	int count, new_count;
 	char name[256];
+	int entries_checked = 0, entries_hidden = 0;
+	int i;
 
 	/* 获取返回值 - x0 for arm64 */
 #ifdef __aarch64__
@@ -195,7 +197,16 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 		return 0;
 
 	count = (int)ret;
-	hidden_entries_count = 0;
+
+	pr_info("[hidefile] getdents64 handler: ret=%d, dirent=%px\n", (int)ret, dirent);
+
+	/* 打印隐藏列表 */
+	pr_info("[hidefile] hidden list (%d entries):\n", hidden_count);
+	for (i = 0; i < hidden_count; i++) {
+		if (hidden_files[i].active)
+			pr_info("  [%d] name=%s, is_dir=%d\n",
+				i, hidden_files[i].name, hidden_files[i].is_dir);
+	}
 
 	/* 分配临时缓冲区 */
 	kbuf = kmalloc(count + 256, GFP_ATOMIC);
@@ -204,6 +215,7 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 
 	/* 复制用户空间数据 */
 	if (copy_from_user(kbuf, dirent, count)) {
+		pr_err("[hidefile] copy_from_user failed\n");
 		kfree(kbuf);
 		return 0;
 	}
@@ -216,14 +228,20 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 	while (curr < kbuf + count) {
 		unsigned short reclen = curr->d_reclen;
 
-		if (reclen == 0)
+		if (reclen == 0) {
+			pr_warn("[hidefile] reclen=0, breaking\n");
 			break;
+		}
 
 		memset(name, 0, sizeof(name));
 		strncpy(name, curr->d_name, sizeof(name) - 1);
 
+		entries_checked++;
+
 		if (is_hidden(name, curr->d_type == DT_DIR)) {
-			hidden_entries_count++;
+			entries_hidden++;
+			pr_info("[hidefile] HIDING: name=%s, d_type=%d\n",
+				name, curr->d_type);
 		} else {
 			/* 非隐藏条目，复制到 write 位置 */
 			if (write_ptr != curr)
@@ -234,6 +252,9 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 
 		curr = (struct linux_dirent64 *)((char *)curr + reclen);
 	}
+
+	pr_info("[hidefile] result: checked=%d, hidden=%d, orig_size=%d, new_size=%d\n",
+		entries_checked, entries_hidden, count, new_count);
 
 	/* 如果有隐藏的条目，更新结果 */
 	if (new_count < count && new_count > 0) {
