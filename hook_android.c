@@ -46,33 +46,34 @@
 /* BPF flags */
 #define BPF_ANY 0
 
-/* Map definitions */
+/* Map definitions - use smaller key size for compatibility */
 #define HIDDEN_FILES_MAX 64
-#define HIDDEN_FILES_SIZE 256
+#define HIDDEN_FILES_SIZE 32  /* Reduced from 256 for Android compatibility */
 
 /* bpf_attr - must match kernel layout exactly */
 typedef struct {
-    __u32 map_fd;
-    __u64 key;
-    __u64 value;
-    __u64 flags;
-    __u64 next_key;
-} bpf_elem_attr_t;
+    __u32         map_type;
+    __u32         key_size;
+    __u32         value_size;
+    __u32         max_entries;
+    __u32         map_flags;
+    __u32         inner_map_fd;
+    __u32         numa_node;
+} bpf_create_attr_t;
 
 typedef struct {
-    __u32 map_type;
-    __u32 key_size;
-    __u32 value_size;
-    __u32 max_entries;
-    __u32 map_flags;
-    __u32 inner_map_fd;
-    __u32 numa_node;
-} bpf_create_attr_t;
+    __u32         map_fd;
+    __u64         key;
+    union {
+        __u64     value;
+        __u64     next_key;
+    };
+    __u64         flags;
+} bpf_elem_attr_t;
 
 typedef union bpf_attr {
     bpf_create_attr_t create;
     bpf_elem_attr_t elem;
-    __u8 data[256];
 } bpf_attr_t;
 
 static int running = 1;
@@ -81,7 +82,13 @@ static int hidden_map_fd = -1;
 /* eBPF syscall wrapper */
 static int bpf_sys(int cmd, bpf_attr_t *attr)
 {
-    int ret = syscall(__NR_bpf, cmd, attr, sizeof(bpf_attr_t));
+    /* Use correct size based on command */
+    int size = (cmd == BPF_MAP_CREATE) ? 
+        sizeof(bpf_create_attr_t) : sizeof(bpf_elem_attr_t);
+    int ret = syscall(__NR_bpf, cmd, attr, size);
+    if (ret < 0) {
+        LOG_ERR("bpf cmd %d failed: errno=%d (%s)", cmd, errno, strerror(errno));
+    }
     return ret;
 }
 
@@ -170,55 +177,96 @@ static void list_hidden_files(void)
 {
     LOG("Listing hidden files...");
     LOG("  map_fd=%d", hidden_map_fd);
+    LOG("  sizeof(bpf_elem_attr_t)=%zu", sizeof(bpf_elem_attr_t));
     
-    char key[HIDDEN_FILES_SIZE] = {};
     char next_key[HIDDEN_FILES_SIZE];
     int count = 0;
     
+    /* First call with NULL key to get first key */
     while (1) {
-        /* First call with empty key to get first key */
         memset(next_key, 0, HIDDEN_FILES_SIZE);
         
-        bpf_attr_t attr = {0};
-        attr.elem.map_fd = hidden_map_fd;
-        attr.elem.key = (__u64)(unsigned long)key;
-        attr.elem.next_key = (__u64)(unsigned long)next_key;
+        bpf_elem_attr_t attr = {
+            .map_fd = hidden_map_fd,
+            .key = 0,  /* NULL to get first key */
+            .next_key = (__u64)(unsigned long)next_key,
+            .flags = 0,
+        };
         
-        LOG("  Calling GET_NEXT_KEY with key='%s'", key);
+        LOG("  GET_NEXT_KEY: map_fd=%d, key=NULL", hidden_map_fd);
         
-        int ret = bpf_sys(BPF_MAP_GET_NEXT_KEY, &attr);
+        int ret = syscall(__NR_bpf, BPF_MAP_GET_NEXT_KEY, &attr, sizeof(attr));
         if (ret < 0) {
-            if (errno == ENOENT) {
-                LOG("  No more keys, iteration complete");
-                break;
-            }
-            LOG_ERR("GET_NEXT_KEY failed: ret=%d, errno=%d (%s)", ret, errno, strerror(errno));
+            LOG_ERR("GET_NEXT_KEY failed: errno=%d (%s)", errno, strerror(errno));
             break;
         }
         
-        LOG("  GET_NEXT_KEY returned, next_key='%s'", next_key);
+        LOG("  First key found: '%s'", next_key);
         
-        /* Check if next_key is valid */
         if (next_key[0] == '\0') {
-            LOG("  next_key is empty, stopping");
+            LOG("  No keys in map");
             break;
         }
         
-        /* Copy next_key to key */
+        /* Now iterate through all keys */
+        char key[HIDDEN_FILES_SIZE];
         memcpy(key, next_key, HIDDEN_FILES_SIZE);
         
         /* Lookup value */
         __u32 val = 0;
-        bpf_attr_t lookup_attr = {0};
-        lookup_attr.elem.map_fd = hidden_map_fd;
-        lookup_attr.elem.key = (__u64)(unsigned long)key;
-        lookup_attr.elem.value = (__u64)(unsigned long)&val;
+        bpf_elem_attr_t lookup_attr = {
+            .map_fd = hidden_map_fd,
+            .key = (__u64)(unsigned long)key,
+            .value = (__u64)(unsigned long)&val,
+            .flags = 0,
+        };
         
-        ret = bpf_sys(BPF_MAP_LOOKUP_ELEM, &lookup_attr);
+        ret = syscall(__NR_bpf, BPF_MAP_LOOKUP_ELEM, &lookup_attr, sizeof(lookup_attr));
         if (ret == 0) {
             LOG("  [%d] '%s' (%s)", count, key, val == 2 ? "dir" : "file");
             count++;
         }
+        
+        /* Get next key */
+        while (1) {
+            memset(next_key, 0, HIDDEN_FILES_SIZE);
+            
+            bpf_elem_attr_t next_attr = {
+                .map_fd = hidden_map_fd,
+                .key = (__u64)(unsigned long)key,
+                .next_key = (__u64)(unsigned long)next_key,
+                .flags = 0,
+            };
+            
+            ret = syscall(__NR_bpf, BPF_MAP_GET_NEXT_KEY, &next_attr, sizeof(next_attr));
+            if (ret < 0) {
+                if (errno == ENOENT) {
+                    break;  /* No more keys */
+                }
+                LOG_ERR("GET_NEXT_KEY failed: errno=%d (%s)", errno, strerror(errno));
+                break;
+            }
+            
+            if (next_key[0] == '\0') {
+                break;
+            }
+            
+            memcpy(key, next_key, HIDDEN_FILES_SIZE);
+            
+            /* Lookup value */
+            memset(&lookup_attr, 0, sizeof(lookup_attr));
+            lookup_attr.map_fd = hidden_map_fd;
+            lookup_attr.key = (__u64)(unsigned long)key;
+            lookup_attr.value = (__u64)(unsigned long)&val;
+            
+            ret = syscall(__NR_bpf, BPF_MAP_LOOKUP_ELEM, &lookup_attr, sizeof(lookup_attr));
+            if (ret == 0) {
+                LOG("  [%d] '%s' (%s)", count, key, val == 2 ? "dir" : "file");
+                count++;
+            }
+        }
+        
+        break;  /* Exit outer loop */
     }
     
     if (count == 0) {
