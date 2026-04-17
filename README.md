@@ -1,76 +1,107 @@
-# HOOK - 内核通用 Hook 框架
+# HOOK - eBPF File Hiding Module
 
-跨内核版本 (5.10 - 6.12) 的内核 Hook 框架，支持文件/文件夹隐藏功能。
+基于 eBPF 的文件/文件夹隐藏模块，使用 tracepoint 监控 `getdents64` 系统调用。
 
 ## 功能
 
-- **VFS Hook**: hook `getdents64` 过滤目录列表
-- **Kprobe**: 通用 Kprobe Hook 支持
-- **隐藏文件/文件夹**: 添加到隐藏列表的条目将从目录遍历中移除
-- **多架构**: 支持 arm64 和 x86_64
+- **eBPF 监控**: 通过 tracepoint 监控目录遍历
+- **隐藏列表管理**: 通过 `/dev/hidefile` 设备节点管理
+- **实时日志**: 通过 ringbuffer 实时监控隐藏事件
+- **统计信息**: 支持查看调用统计
+
+## 架构
+
+```
+                    +------------------+
+                    |  eBPF Program    |
+                    | hook.bpf.c       |
+                    +--------+---------+
+                             |
+              +--------------+--------------+
+              |                             |
+    +---------v---------+         +---------v---------+
+    |  Tracepoint       |         |  Ringbuffer        |
+    |  sys_exit_getdents| --------> |  (events)         |
+    +-------------------+         +-------------------+
+                                           |
+                                  +---------v---------+
+                                  |  Polling Thread   |
+                                  +-------------------+
+
+    +-------------------+         +-------------------+
+    |  Hidden Files Map | <------ |  Userspace Loader |
+    |  (BPF Hash Map)   |         |  hook_loader.c    |
+    +-------------------+         +--------+----------+
+                                            |
+                                   +--------v----------+
+                                   |  /dev/hidefile     |
+                                   |  (control device)  |
+                                   +--------------------+
+```
 
 ## 编译
 
-### 本地编译
+### 依赖
 
 ```bash
-# arm64
-make ARCH=arm64 CC=clang
+# Ubuntu/Debian
+sudo apt install clang llvm libbpf-dev pkg-config
 
-# x86_64
-make ARCH=x86_64 CC=clang
+# 需要 bpftool (来自 linux-tools)
+sudo apt install linux-tools-$(uname -r)
 ```
 
-### DDK 编译 (多内核版本)
+### 编译
 
-使用 GitHub Actions 自动编译：
-- 访问 Actions -> Build HOOK Kernel Module -> Run workflow
-
-支持的版本:
-- android12-5.10 (arm64, x86_64)
-- android13-5.10 (arm64, x86_64)
-- android13-5.15 (arm64, x86_64)
-- android14-5.15 (arm64, x86_64)
-- android14-6.1 (arm64, x86_64)
-- android15-6.6 (arm64, x86_64)
-- android16-6.12 (arm64, x86_64)
-
-## API
-
-### 隐藏文件/文件夹
-
-```c
-#include "hook.h"
-
-// 添加隐藏文件
-add_hidden_file("secret.txt", false);
-
-// 添加隐藏文件夹
-add_hidden_file("hidden_dir", true);
-
-// 移除隐藏
-remove_hidden_file("secret.txt");
-
-// 检查是否隐藏
-is_hidden("secret.txt", false);
-
-// 清空隐藏列表
-clear_hidden_list();
+```bash
+make
 ```
+
+### 运行
+
+```bash
+sudo ./hook_loader
+```
+
+## 使用
+
+```bash
+# 隐藏文件
+echo "secret.txt" > /dev/hidefile
+
+# 隐藏目录
+echo "d:hidden_dir" > /dev/hidefile
+
+# 列出当前隐藏的文件
+echo "list" > /dev/hidefile
+
+# 查看统计信息
+echo "stats" > /dev/hidefile
+
+# 清除所有隐藏
+echo "clear" > /dev/hidefile
+```
+
+## 注意事项
+
+此版本基于 **eBPF monitoring** 架构：
+- eBPF 程序通过 tracepoint 监控 `getdents64`
+- 识别隐藏的条目并通过 ringbuffer 上报
+- 实际的隐藏逻辑通过扩展实现
+
+如需更完整的隐藏功能，可以结合内核模块使用。
 
 ## 目录结构
 
 ```
-HOOK/
-├── .github/workflows/     # CI 配置
-├── include/              # 头文件
-├── arm64/                # ARM64 架构代码
-├── x86_64/              # x86_64 架构代码
-├── hook_manager.c       # 核心管理器
-├── kprobe_hook.c        # Kprobe 实现
-├── vfs_hook.c           # VFS Hook 实现
-├── Makefile
-└── README.md
+AndroidLKM/
+├── hook.bpf.c        # eBPF 程序
+├── hook_loader.c     # 用户空间加载器
+├── hook.h            # 头文件
+├── Makefile          # 编译配置
+├── README.md         # 本文档
+└── .github/workflows/
+    └── build-ebpf.yml  # CI 配置
 ```
 
 ## 许可证
