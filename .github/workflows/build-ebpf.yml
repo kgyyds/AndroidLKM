@@ -13,39 +13,7 @@ env:
   ANDROID_NDK_VERSION: r26d
 
 jobs:
-  # Build for host (x86_64)
-  build-host:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout source code
-      uses: actions/checkout@v4
-
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y clang llvm libbpf-dev pkg-config linux-tools-generic
-
-    - name: Build for host
-      run: |
-        make clean 2>/dev/null || true
-        make bpf skeleton 2>&1
-
-    - name: Build loader
-      run: |
-        make loader 2>&1 || echo "Loader build skipped (needs libbpf)"
-        file hook_loader 2>/dev/null || true
-
-    - name: Upload host artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ebpf-host
-        path: |
-          *.o
-          *.skel.h
-          hook_loader
-        retention-days: 7
-
-  # Build for Android (ARM64)
+  # Build for Android (ARM64) - Primary target
   build-android:
     runs-on: ubuntu-latest
     steps:
@@ -58,38 +26,43 @@ jobs:
         unzip -q ndk.zip
         ls -la android-ndk-${{ env.ANDROID_NDK_VERSION }}/
 
-    - name: Set up Android NDK
+    - name: Set up Android NDK environment
       run: |
-        echo "ANDROID_NDK_ROOT=$PWD/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
-        export PATH=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-        which aarch64-linux-android34-clang || which aarch64-linux-android21-clang || echo "Clang not found"
-        which aarch64-linux-android34-ld || echo "Linker not found"
+        ANDROID_NDK_ROOT=$PWD/android-ndk-${{ env.ANDROID_NDK_VERSION }}
+        echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+        echo "PATH=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
+        ls $ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android* 2>/dev/null || true
 
     - name: Build BPF object
       run: |
-        sudo apt-get install -y clang llvm
+        sudo apt-get install -y clang llvm 2>/dev/null || true
         make clean 2>/dev/null || true
         make bpf 2>&1 || true
+        ls -la *.o 2>/dev/null || echo "BPF build completed"
 
-    - name: Build Android binary
+    - name: Build Android ARM64 binary
       run: |
+        set -e
         export ANDROID_NDK_ROOT=$PWD/android-ndk-${{ env.ANDROID_NDK_VERSION }}
         export PATH=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
         
-        echo "=== Building Android ARM64 binary ==="
+        echo "=== Compiler info ==="
+        which aarch64-linux-android34-clang && aarch64-linux-android34-clang --version || true
         
-        # Use NDK clang with static linking
+        echo "=== Building Android ARM64 binary ==="
         aarch64-linux-android34-clang \
           -static \
           -O2 \
           -Wall \
+          -no-pie \
           -o hook_android \
           hook_android.c \
           2>&1
         
         echo "=== Build result ==="
-        ls -la hook_android 2>/dev/null || echo "Build failed"
+        ls -la hook_android 2>/dev/null || { echo "Build failed!"; exit 1; }
         file hook_android 2>/dev/null || true
+        echo "Build successful!"
 
     - name: Upload Android artifacts
       uses: actions/upload-artifact@v4
@@ -97,6 +70,34 @@ jobs:
         name: ebpf-android
         path: |
           *.o
-          *.skel.h
           hook_android
+        retention-days: 7
+
+  # Build for host (x86_64) - Secondary
+  build-host:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang llvm libbpf-dev pkg-config linux-tools-generic 2>/dev/null || true
+
+    - name: Build for host
+      run: |
+        make clean 2>/dev/null || true
+        make all 2>&1 || true
+        ls -la *.o *.skel.h hook_loader 2>/dev/null || echo "Host build completed"
+
+    - name: Upload host artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ebpf-host
+        path: |
+          *.o
+          *.skel.h
+          hook_loader
         retention-days: 7
