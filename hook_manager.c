@@ -169,12 +169,14 @@ static int hidden_entries_count;
 /* Entry handler - 保存参数 */
 static int getdents64_rp_pre(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	/* 在 entry 时保存 dirent 参数 */
+	/* 在 entry 时保存 dirent 参数到 instance->data */
+	void *dirent;
 #ifdef __aarch64__
-	ri->data = (void *)regs->regs[1];
+	dirent = (void *)regs->regs[1];
 #else
-	ri->data = (void *)regs->di;
+	dirent = (void *)regs->di;
 #endif
+	memcpy(ri->data, &dirent, sizeof(dirent));
 	return 0;
 }
 
@@ -190,7 +192,7 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 	int i;
 
 	/* 从 entry handler 保存的数据中获取 dirent */
-	dirent = (struct linux_dirent64 __user *)ri->data;
+	memcpy(&dirent, ri->data, sizeof(dirent));
 
 	/* 获取返回值 - x0 for arm64 */
 #ifdef __aarch64__
