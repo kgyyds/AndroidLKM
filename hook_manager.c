@@ -166,11 +166,6 @@ struct linux_dirent64 {
 /* Kprobe for sys_getdents64 - 使用 return handler */
 static int hidden_entries_count;
 
-/* 数据结构用于传递参数 */
-struct getdents64_data {
-	struct linux_dirent64 __user *dirent;
-};
-
 /* Entry handler - 保存参数 */
 static int getdents64_rp_pre(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
