@@ -44,22 +44,26 @@ static ssize_t hidefile_write(struct file *file, const char __user *buf,
 	if (strcmp(cmd, "clear") == 0) {
 		extern void clear_hidden_list(void);
 		clear_hidden_list();
-		pr_info("hook: all hidden cleared\n");
+		pr_info("[hidefile] clear all hidden entries\n");
 		kfree(kbuf);
 		return count;
 	}
 
 	/* Check for directory prefix "d:" */
 	if (strncmp(cmd, "d:", 2) == 0) {
+		pr_info("[hidefile] add hidden dir: %s\n", cmd + 2);
 		ret = add_hidden_file(cmd + 2, true);
 	} else {
+		pr_info("[hidefile] add hidden file: %s\n", cmd);
 		ret = add_hidden_file(cmd, false);
 	}
 
 	if (ret == 0)
-		pr_info("hook: hidden: %s\n", cmd);
-	else if (ret != -EEXIST)
-		pr_err("hook: add failed: %d\n", ret);
+		pr_info("[hidefile] success: %s\n", cmd);
+	else if (ret == -EEXIST)
+		pr_info("[hidefile] already exists: %s\n", cmd);
+	else
+		pr_err("[hidefile] failed to add %s: %d\n", cmd, ret);
 
 	kfree(kbuf);
 	return count;
