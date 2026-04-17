@@ -9,6 +9,9 @@ on:
       - ebpf
   workflow_dispatch:
 
+env:
+  ANDROID_NDK_VERSION: r26d
+
 jobs:
   # Build for host (x86_64)
   build-host:
@@ -25,7 +28,12 @@ jobs:
     - name: Build for host
       run: |
         make clean 2>/dev/null || true
-        make all 2>&1
+        make bpf skeleton 2>&1
+
+    - name: Build loader
+      run: |
+        make loader 2>&1 || echo "Loader build skipped (needs libbpf)"
+        file hook_loader 2>/dev/null || true
 
     - name: Upload host artifacts
       uses: actions/upload-artifact@v4
@@ -46,98 +54,42 @@ jobs:
 
     - name: Download Android NDK
       run: |
-        wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip -O ndk.zip
+        wget -q https://dl.google.com/android/repository/android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip -O ndk.zip
         unzip -q ndk.zip
+        ls -la android-ndk-${{ env.ANDROID_NDK_VERSION }}/
+
+    - name: Set up Android NDK
+      run: |
+        echo "ANDROID_NDK_ROOT=$PWD/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
+        export PATH=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+        which aarch64-linux-android34-clang || which aarch64-linux-android21-clang || echo "Clang not found"
+        which aarch64-linux-android34-ld || echo "Linker not found"
 
     - name: Build BPF object
       run: |
         sudo apt-get install -y clang llvm
         make clean 2>/dev/null || true
         make bpf 2>&1 || true
-        make skeleton 2>&1 || true
 
-    - name: Build for Android ARM64
+    - name: Build Android binary
       run: |
-        export NDK=$PWD/android-ndk-r26d
-        export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-        export PATH=$TOOLCHAIN/bin:$PATH
-        export ANDROID_NDK=$NDK
-        export SYSROOT=$TOOLCHAIN/sysroot
+        export ANDROID_NDK_ROOT=$PWD/android-ndk-${{ env.ANDROID_NDK_VERSION }}
+        export PATH=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
         
-        # Create simple test program
-        cat > hook_android.c << 'EOF'
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/ioctl.h>
-#include <sys/epoll.h>
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
-
-/* hide_event must match BPF definition */
-struct hide_event {
-    __u64 pid;
-    char name[256];
-    __u32 is_dir;
-    __u32 timestamp;
-};
-
-static struct hook_bpf *skel;
-
-static void sig_handler(int sig) {}
-
-int main(int argc, char **argv) {
-    printf("[hook_loader] Android ARM64 eBPF File Hiding Module\n");
-    printf("[hook_loader] Version: 1.0\n");
-    
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
-    
-    /* Load BPF skeleton */
-    skel = hook_bpf__open();
-    if (!skel) {
-        fprintf(stderr, "Failed to open BPF skeleton\n");
-        return 1;
-    }
-    
-    int err = hook_bpf__load(skel);
-    if (err) {
-        fprintf(stderr, "Failed to load BPF: %d\n", err);
-        hook_bpf__destroy(skel);
-        return 1;
-    }
-    
-    printf("[hook_loader] BPF loaded successfully\n");
-    
-    /* Attach tracepoint */
-    struct bpf_link *link = bpf_program__attach(skel->progs.trace_exit_getdents64);
-    if (!link) {
-        fprintf(stderr, "Failed to attach tracepoint\n");
-        hook_bpf__destroy(skel);
-        return 1;
-    }
-    
-    printf("[hook_loader] Attached to getdents64 tracepoint\n");
-    printf("[hook_loader] Module running. Press Ctrl+C to exit.\n");
-    
-    while (1) sleep(1);
-    
-    hook_bpf__destroy(skel);
-    return 0;
-}
-EOF
+        echo "=== Building Android ARM64 binary ==="
         
-        # Try to compile - will fail without full libbpf but creates the file
-        aarch64-linux-android34-clang -static -o hook_loader.android hook_android.c 2>&1 || {
-            echo "Note: Full compilation needs libbpf for Android"
-            # Create a placeholder binary
-            echo "placeholder" > hook_loader.android
-        }
+        # Use NDK clang with static linking
+        aarch64-linux-android34-clang \
+          -static \
+          -O2 \
+          -Wall \
+          -o hook_android \
+          hook_android.c \
+          2>&1
         
-        rm -f hook_android.c
+        echo "=== Build result ==="
+        ls -la hook_android 2>/dev/null || echo "Build failed"
+        file hook_android 2>/dev/null || true
 
     - name: Upload Android artifacts
       uses: actions/upload-artifact@v4
@@ -146,5 +98,5 @@ EOF
         path: |
           *.o
           *.skel.h
-          hook_loader.android
+          hook_android
         retention-days: 7

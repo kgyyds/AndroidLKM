@@ -8,7 +8,6 @@ CLANG ?= clang
 LLC ?= llc
 BPFTOOL ?= bpftool
 CC ?= gcc
-PKG_CONFIG ?= pkg-config
 
 # BPF compilation flags
 BPF_TARGET := bpf
@@ -19,27 +18,22 @@ BPF_CFLAGS := -Wall -Wno-unused-value -Wno-pointer-sign \
 
 # Userspace compilation flags  
 CFLAGS := -Wall -O2 -g
-CFLAGS += $(shell $(PKG_CONFIG) --cflags libbpf 2>/dev/null)
-LDFLAGS := $(shell $(PKG_CONFIG) --libs libbpf 2>/dev/null || echo "-lbpf -lelf")
 
 # Output files
 BPF_OBJ := $(MDIR)/hook.bpf.o
 SKEL_HDR := $(MDIR)/hook.skel.h
 VMLINUX_HDR := $(MDIR)/vmlinux.h
-LOADER := $(MDIR)/hook_loader
+LOADER_HOST := $(MDIR)/hook_loader
+LOADER_ANDROID := $(MDIR)/hook_android
 
 # Sources
 BPF_SRC := hook.bpf.c
 LOADER_SRC := hook_loader.c
+ANDROID_SRC := hook_android.c
 
 # Default target
 .PHONY: all
-all: $(LOADER)
-
-# Generate vmlinux.h if not exists
-$(VMLINUX_HDR):
-	@echo "Note: vmlinux.h not generated (optional for simple BPF programs)"
-	@touch $@
+all: bpf skeleton loader
 
 # Build BPF object
 .PHONY: bpf
@@ -58,25 +52,38 @@ skeleton: $(SKEL_HDR)
 $(SKEL_HDR): $(BPF_OBJ)
 	@echo "  BPFTOOL gen skeleton $(notdir $@)"
 	@$(BPFTOOL) gen skeleton $< > $@ 2>/dev/null || \
-		echo "/* Skeleton not generated - run 'make skeleton' with bpftool */"
+		echo "/* Skeleton not generated */"
 
-# Build userspace loader
+# Build userspace loader (host)
 .PHONY: loader
-loader: $(LOADER)
+loader: $(LOADER_HOST)
 
-$(LOADER): $(LOADER_SRC) $(SKEL_HDR)
+$(LOADER_HOST): $(LOADER_SRC) $(SKEL_HDR)
 	@echo "  CC $(notdir $@)"
-	$(CC) $(CFLAGS) -o $@ $(LOADER_SRC) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(LOADER_SRC) -lbpf -lelf
 
-# Build everything
-.PHONY: all
-all: bpf skeleton loader
+# Build Android binary
+.PHONY: android
+android: $(LOADER_ANDROID)
+
+$(LOADER_ANDROID): $(ANDROID_SRC)
+	@echo "  Building Android ARM64 binary"
+	@if [ -n "$$ANDROID_NDK_ROOT" ]; then \
+		export PATH=$$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$$PATH; \
+		aarch64-linux-android34-clang -static -o $@ $<; \
+	elif [ -d "$$HOME/android-ndk" ]; then \
+		export PATH=$$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$$PATH; \
+		aarch64-linux-android34-clang -static -o $@ $<; \
+	else \
+		echo "Android NDK not found, skipping Android build"; \
+	fi
 
 # Clean
 .PHONY: clean
 clean:
-	rm -f $(BPF_OBJ) $(SKEL_HDR) $(LOADER) $(VMLINUX_HDR)
-	rm -f *.o *.skel.h vmlinux.h
+	rm -f $(BPF_OBJ) $(SKEL_HDR) $(LOADER_HOST) $(LOADER_ANDROID)
+	rm -f $(VMLINUX_HDR)
+	rm -f *.o *.skel.h hook_loader hook_android
 
 # Help
 .PHONY: help
@@ -84,20 +91,18 @@ help:
 	@echo "HOOK eBPF File Hiding Module"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all      - Build everything (default)"
+	@echo "  all      - Build everything (BPF + loader)"
 	@echo "  bpf      - Build BPF object file"
 	@echo "  skeleton - Generate BPF skeleton header"
-	@echo "  loader   - Build userspace loader"
+	@echo "  loader   - Build host userspace loader"
+	@echo "  android  - Build Android ARM64 binary"
 	@echo "  clean    - Remove build artifacts"
 	@echo ""
 	@echo "Requirements:"
 	@echo "  - clang with BPF target support"
 	@echo "  - llvm LLC"
-	@echo "  - bpftool"
-	@echo "  - libbpf-dev"
+	@echo "  - bpftool (for skeleton generation)"
+	@echo "  - libbpf-dev (for host loader)"
 	@echo ""
-	@echo "Usage:"
-	@echo "  sudo ./hook_loader"
-	@echo "  echo file > /dev/hidefile"
-	@echo "  echo d:dir > /dev/hidefile"
-	@echo "  echo clear > /dev/hidefile"
+	@echo "Android Build:"
+	@echo "  ANDROID_NDK_ROOT=/path/to/ndk make android"
