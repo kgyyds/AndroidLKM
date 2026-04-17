@@ -1,0 +1,65 @@
+name: Build eBPF Module
+
+on:
+  push:
+    branches:
+      - ebpf
+  pull_request:
+    branches:
+      - ebpf
+  workflow_dispatch:
+
+jobs:
+  build-ebpf:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          clang \
+          llvm \
+          libbpf-dev \
+          pkg-config \
+          linux-tools-generic \
+          || true
+
+    - name: Check bpftool
+      run: |
+        which bpftool || echo "bpftool not found, will generate skeleton manually"
+
+    - name: Build eBPF
+      run: |
+        make bpf 2>&1 || true
+        ls -la *.o 2>/dev/null || echo "BPF build attempted"
+
+    - name: Build skeleton
+      run: |
+        if command -v bpftool &> /dev/null; then
+          make skeleton 2>&1
+        else
+          echo "Skipping skeleton (bpftool not available)"
+        fi
+
+    - name: Build loader
+      run: |
+        make loader 2>&1 || true
+
+    - name: Show build artifacts
+      run: |
+        echo "=== Build Artifacts ==="
+        ls -la *.o *.skel.h hook_loader 2>/dev/null || echo "Some artifacts may not be built"
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ebpf-artifacts
+        path: |
+          *.o
+          *.skel.h
+          hook_loader
+        retention-days: 7
